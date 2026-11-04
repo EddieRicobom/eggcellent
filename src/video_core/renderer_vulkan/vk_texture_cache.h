@@ -723,8 +723,9 @@ public:
 
 private:
     struct StorageViews {
-        std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> signeds;
-        std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> unsigneds;
+        std::array<std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES>,
+                   static_cast<size_t>(Shader::ImageFormat::R32G32B32A32_UINT) + 1>
+            formats;
     };
 
     [[nodiscard]] vk::ImageView MakeView(VkFormat vk_format, VkImageAspectFlags aspect_mask,

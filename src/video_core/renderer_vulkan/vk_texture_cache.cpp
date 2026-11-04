@@ -4139,11 +4139,9 @@ VkImageView ImageView::StorageView(Shader::TextureType texture_type,
             }
             return *typeless_storage_view;
         }
-        const bool is_signed = image_format == Shader::ImageFormat::R8_SINT
-            || image_format == Shader::ImageFormat::R16_SINT;
         if (!storage_views)
             storage_views.emplace();
-        auto& views{is_signed ? storage_views->signeds : storage_views->unsigneds};
+        auto& views{storage_views->formats[static_cast<size_t>(image_format)]};
         auto& view{views[size_t(texture_type)]};
         if (!view)
             view = MakeView(Format(image_format), VK_IMAGE_ASPECT_COLOR_BIT, texture_type);
