@@ -1,76 +1,15 @@
-# eggcellent
+# Eggcellent
 
-A egglantine mix fork with optimization focus
+Eggcellent is an experimental Nintendo Switch emulator based on [PokeDinner](https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork/), a fork of [Eglantine](https://github.com/Djihads80/Eglantine), which builds on [Eden](https://git.eden-emu.dev/eden-emu/eden) and yuzu. It also includes an optional patch from [Frizti/Lichii](https://github.com/Frizti/Lichii). Switch 2 support is experimental, and compatibility and performance vary.
 
-<!--
-# SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
-# SPDX-License-Identifier: GPL-3.0-or-later
+## Windows builds
 
-# SPDX-FileCopyrightText: 2018 yuzu Emulator Project
-# SPDX-License-Identifier: GPL-2.0-or-later
--->
-<!-- lang: en-GB -->
-<h1 align="center">
-  <br>
-  <a href="https://git.eden-emu.dev/eden-emu/eden"><img src="https://github.com/user-attachments/assets/35031845-4bfa-4916-8bf5-bc3bce67d5e2" alt="Eglantine" width="200"></a>
-  <br>
-  <b>Eglantine</b>
-  <br>
-</h1>
+The [Windows GitHub Actions workflow](https://github.com/EddieRicobom/eggcellent/actions/workflows/eggcellent-windows.yml) builds a Windows x86_64 binary when changes are pushed to `main` and can also be started manually. Open a successful workflow run and download its `eggcellent-windows-x86_64-<commit>` artifact. Extract the ZIP to run the program. Artifacts are retained for 7 days; they are CI builds, not tagged releases.
 
-<h4 align="center"><b>Eglantine</b> is a free and opensource (FOSS) Switch 2 emulator, derived from Eden, Yuzu and Sudachi - started by developer Camille LaVey.
-It's written in C++ with portability in mind, with builds for Windows, Linux and macOS
-</h4>
+## Experimental Ocarina of Time Dynamic FPS
 
-<p align="center">
-    </a>
-    <a href="https://discord.gg/jCCZ58VExk">
-        <img src="https://img.shields.io/discord/1367654015269339267?color=5865F2&label=Eglantine&logo=discord&logoColor=white"
-            alt="Discord">
-    </a>
-  
-</p>
+An experimental **Ocarina of Time: Dynamic FPS** option is available in Graphics > Advanced Graphics. It is off by default. The built-in patch only applies when enabled and when the game matches title ID `0400486024DEC000` and main build ID `E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348`. Other builds are not patched. This feature is experimental and may not work as expected.
 
-<p align="center">
-  <a href="#compatibility">Compatibility</a> |
-  <a href="#development">Development</a> |
-  <a href="#building">Building</a> |
-  <a href="#download">Download</a> |
-  <a href="#support">Support</a> |
-  <a href="#license">License</a>
-</p>
+## Attribution and licenses
 
-## Compatibility
-
-The emulator is capable of running Mario Kart World at decent/full speed depending on specs and configurations, and Splatoon Raiders at variable performances
-
-A list of supported games will be available in future. Please be patient.
-
-## Development
-For development discussions, please join us on [Discord](https://discord.gg/jCCZ58VExk)
-
-If you would like to contribute, we are open to new developers and pull requests. Please ensure that your work is of a high standard and properly documented. You can also contact any of the developers on Discord or Stoat to learn more about the current state of the emulator.
-
-## Documentation
-
-We have a user manual! See our [User Handbook](./docs/user/README.md).
-
-## Building
-
-See the [General Build Guide](docs/Build.md)
-
-For information on provided development tooling, see the [Tools directory](./tools)
-
-## Download
-
-You can download the latest releases from [here](https://github.com/Djihads80/Eglantine/releases).
-
-## Support
-
-We currently do not take in any donations for the time being
-
-If you would prefer to support us in a different way, please join our [Discord](https://discord.gg/jCCZ58VExk)
-
-## License
-
-Eglantine is licensed under the GPLv3 (or any later version). Refer to the [LICENSE.txt](https://github.com/Djihads80/Eglantine/blob/nx2/LICENSE.txt) file.
+Eggcellent retains upstream copyright and license notices. The source includes code under different licenses, including Eden's GPL-3.0-or-later and yuzu's GPL-2.0-or-later terms; check each file's SPDX headers and the [`LICENSES`](LICENSES) directory for applicable terms. [`LICENSE.txt`](LICENSE.txt) contains the GNU GPL version 3 text.
