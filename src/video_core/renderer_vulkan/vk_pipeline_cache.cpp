@@ -70,7 +70,7 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
 
-constexpr u32 CACHE_VERSION = 21;
+constexpr u32 CACHE_VERSION = 30;
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
@@ -352,7 +352,10 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
         info.tess_spacing = key.tess_spacing;
         break;
     case Shader::Stage::Mesh:
-        info.convert_depth_mode = key.convert_depth_mode;
+        info.convert_depth_mode = gl_ndc;
+        if (program.mesh.topology == 0) {
+            info.fixed_state_point_size = point_size;
+        }
         break;
     case Shader::Stage::Geometry:
         if (program.output_topology == Shader::OutputTopology::PointList) {
@@ -830,6 +833,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
     }
     if (!RefreshStages(graphics_key.unique_hashes)) {
         current_pipeline = nullptr;
+        graphics_miss = "stage-rejected";
         return nullptr;
     }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
@@ -1130,6 +1134,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     }
     auto& pipeline{it->second};
     if (!pipeline) {
+        graphics_miss = "creation-failed";
         return nullptr;
     }
     if (used_this_session.insert(pipeline.get()).second &&
@@ -1211,7 +1216,8 @@ bool PipelineCache::CanSkipDraw() const noexcept {
     // If something is using depth, we can assume that games are not rendering anything which
     // will be used one time.
     if (maxwell3d->regs.zeta_enable) {
-        return true;
+        graphics_miss = "async-build";
+        return nullptr;
     }
     // If games are using a small index count, we can assume these are full screen quads.
     // Usually these shaders are only used once for building textures so we can assume they
@@ -1220,23 +1226,8 @@ bool PipelineCache::CanSkipDraw() const noexcept {
     if (draw_state.draw_element_count <= 6) {
         return false;
     }
-    return true;
-}
-
-bool PipelineCache::BuildNewGraphicsPipeline() {
-    if (CanTranslateAsynchronously()) {
-        // With an earlier pipeline's shaders only the driver compile is left, and it goes to the
-        // pipeline workers: no translation worker is needed.
-        if (std::unique_ptr<GraphicsPipeline> pipeline{CreateGraphicsPipelineFromReusedShaders()}) {
-            graphics_cache.emplace(graphics_key, std::move(pipeline));
-            return true;
-        }
-        if (std::optional<std::future<void>> done{QueueGraphicsTranslation()}) {
-            return WaitForGraphicsTranslation(*done);
-        }
-    }
-    graphics_cache.emplace(graphics_key, CreateGraphicsPipeline());
-    return true;
+    graphics_miss = "async-build";
+    return nullptr;
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
@@ -1390,7 +1381,6 @@ std::shared_ptr<ReusableShaders> PipelineCache::BuildGraphicsShaders(
             auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env);
         }
-        translate_timer.reset();
 
         if (device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY && Shader::Optimization::HasBrokenPattern(programs[index])) {
             LOG_WARNING(Render_Vulkan, "0x{:016x}: Skipping shader with known issues", key.unique_hashes[index]);
@@ -1405,37 +1395,42 @@ std::shared_ptr<ReusableShaders> PipelineCache::BuildGraphicsShaders(
             layer_source_program = &programs[index];
         }
     }
-
-#ifdef _WIN32
-    // AMD's Windows driver can crash when a geometry shader exports all generic locations.
-    if (device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY && !key.xfb_enabled) {
-        constexpr size_t geometry_index = static_cast<size_t>(Maxwell::ShaderType::Geometry);
-        constexpr size_t fragment_index = static_cast<size_t>(Maxwell::ShaderType::Pixel);
-        if (key.unique_hashes[geometry_index] != 0 &&
-            key.unique_hashes[fragment_index] != 0) {
-            auto& geometry = programs[geometry_index];
-            const auto& fragment = programs[fragment_index];
-            size_t generic_outputs{};
-            for (size_t index = 0; index < Shader::IR::NUM_GENERICS; ++index) {
-                generic_outputs += geometry.info.stores.Generic(index) ? 1 : 0;
+    // A tessellation pipeline the driver would refuse is skipped like a missing mesh pipeline:
+    // the draw is dropped (see the pipeline check in the rasterizer) instead of failing the build.
+    {
+        const Shader::IR::Program* control{};
+        const Shader::IR::Program* evaluation{};
+        for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+            if (key.unique_hashes[index] == 0) {
+                continue;
             }
-            if (generic_outputs == Shader::IR::NUM_GENERICS &&
-                !geometry.info.stores.Legacy() && !fragment.info.loads.Legacy()) {
-                for (size_t index = 0; index < Shader::IR::NUM_GENERICS; ++index) {
-                    if (fragment.info.loads.Generic(index)) {
-                        continue;
-                    }
-                    for (size_t component = 0; component < 4; ++component) {
-                        geometry.info.stores.Set(Shader::IR::Attribute::Generic0X + index * 4 +
-                                                     component,
-                                                 false);
-                    }
-                }
+            if (programs[index].stage == Shader::Stage::TessellationControl) {
+                control = &programs[index];
+            } else if (programs[index].stage == Shader::Stage::TessellationEval) {
+                evaluation = &programs[index];
+            }
+        }
+        if (control != nullptr || evaluation != nullptr) {
+            const u32 max_patch_size = device.GetMaxTessellationPatchSize();
+            const char* reason = nullptr;
+            if (!device.IsTessellationSupported()) {
+                reason = "the device has no tessellation shaders";
+            } else if (control == nullptr || evaluation == nullptr) {
+                reason = "it has only one of the control and evaluation stages";
+            } else if (control->invocations == 0 || control->invocations > max_patch_size) {
+                reason = "the control shader's output vertex count is out of range";
+            }
+            if (reason != nullptr) {
+                LOG_WARNING(Render_Vulkan,
+                            "Skipping tessellation pipeline: {} (tcs={} tes={}, tcs output "
+                            "vertices {}, patch control points {}, device max patch size {})",
+                            reason, control != nullptr, evaluation != nullptr,
+                            control != nullptr ? control->invocations : 0,
+                            key.state.patch_control_points_minus_one.Value() + 1, max_patch_size);
+                return nullptr;
             }
         }
     }
-#endif
-
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
     auto modules{std::make_shared<GraphicsShaderModules>()};
 
