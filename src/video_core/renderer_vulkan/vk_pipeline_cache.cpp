@@ -1597,6 +1597,22 @@ TranslationReport& GetTranslationReport() {
 }
 } // Anonymous namespace
 
+bool PipelineCache::BuildNewGraphicsPipeline() {
+    if (CanTranslateAsynchronously()) {
+        // With an earlier pipeline's shaders only the driver compile is left, and it goes to the
+        // pipeline workers: no translation worker is needed.
+        if (std::unique_ptr<GraphicsPipeline> pipeline{CreateGraphicsPipelineFromReusedShaders()}) {
+            graphics_cache.emplace(graphics_key, std::move(pipeline));
+            return true;
+        }
+        if (std::optional<std::future<void>> done{QueueGraphicsTranslation()}) {
+            return WaitForGraphicsTranslation(*done);
+        }
+    }
+    graphics_cache.emplace(graphics_key, CreateGraphicsPipeline());
+    return true;
+}
+
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     const auto begin = std::chrono::steady_clock::now();
     SCOPE_EXIT {
