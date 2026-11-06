@@ -358,6 +358,8 @@ private slots:
     void OnGameListDumpRomFS(u64 program_id, const std::string& game_path, DumpRomFSTarget target);
     void OnGameListVerifyIntegrity(const std::string& game_path);
     void OnGameListConvertToNup(const std::string& game_path);
+    void OnGameListExtractNup(const std::string& game_path);
+    void OnGameListEditNupMetadata(const std::string& game_path);
     void OnGameListCopyTID(u64 program_id);
     void OnGameListCreateShortcut(u64 program_id, const std::string& game_path,
                                   const QtCommon::Game::ShortcutTarget target);
@@ -504,6 +506,7 @@ private:
 
     MultiplayerState* multiplayer_state = nullptr;
     bool use_recommended_mkw_settings = false;
+    bool asked_recommended_mkw_settings = false;
 
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;
