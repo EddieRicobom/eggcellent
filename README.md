@@ -4,7 +4,7 @@ Eggcellent is an experimental Nintendo Switch emulator based on [PokeDinner](htt
 
 ## Windows builds
 
-The [Windows GitHub Actions workflow](https://github.com/EddieRicobom/eggcellent/actions/workflows/eggcellent-windows.yml) builds a Windows x86_64 binary when changes are pushed to `main` and can also be started manually. Open a successful workflow run and download its `eggcellent-windows-x86_64-<commit>` artifact. Extract the ZIP to run the program. Artifacts are retained for 7 days; they are CI builds, not tagged releases.
+Download the Windows x86_64 ZIP from [Releases](https://github.com/EddieRicobom/eggcellent/releases), extract it, and run `eglantine.exe`. The [Windows workflow](https://github.com/EddieRicobom/eggcellent/actions/workflows/eggcellent-windows.yml) publishes an experimental release after each successful build pushed to `main`; manual runs provide a temporary build artifact. Games, firmware, and keys are not included.
 
 ## Experimental Ocarina of Time Dynamic FPS
 

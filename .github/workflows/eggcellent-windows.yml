@@ -96,3 +96,58 @@ jobs:
           path: build/release/bin/
           if-no-files-found: error
           retention-days: 7
+
+  release:
+    name: Publish Windows prerelease
+    needs: windows
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out license files
+        uses: actions/checkout@v5
+
+      - name: Download Windows binary
+        uses: actions/download-artifact@v7
+        with:
+          name: eggcellent-windows-x86_64-${{ github.sha }}
+          path: artifacts
+
+      - name: Package release ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f artifacts/eglantine.exe
+          rm -f artifacts/*.pdb artifacts/eden-cli.exe
+          cp LICENSE.txt artifacts/
+          cp -R LICENSES artifacts/
+          printf 'Eggcellent for Windows x64\n\nExtract all files and run eglantine.exe.\nIf Windows reports a missing Visual C++ runtime, run vc_redist.x64.exe.\nUse your own keys, firmware and games; they are not included.\nThis build is experimental.\n' > artifacts/LEIA-ME.txt
+          mkdir release-output
+          (cd artifacts && zip -qr ../release-output/eggcellent-windows-x86_64.zip .)
+          unzip -tq release-output/eggcellent-windows-x86_64.zip
+          unzip -l release-output/eggcellent-windows-x86_64.zip | tail -n 4
+          ls -lh release-output/eggcellent-windows-x86_64.zip
+
+      - name: Create prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="eggcellent-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cat > notes.md <<EOF
+          Automatic Windows x86_64 build of \`main\` at ${GITHUB_SHA}.
+
+          Extract the ZIP and run \`eglantine.exe\`. Supply your own keys, firmware and games. This is an experimental build.
+
+          Triggered by @${GITHUB_ACTOR}. [Build and logs](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}).
+          EOF
+          release_url=$(gh release create "$tag" release-output/eggcellent-windows-x86_64.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Eggcellent Windows build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT} (${GITHUB_SHA::7})" \
+            --notes-file notes.md)
+          echo "Published prerelease: $release_url"
+          echo "Published prerelease: $release_url" >> "$GITHUB_STEP_SUMMARY"
