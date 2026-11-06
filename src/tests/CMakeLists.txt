@@ -26,6 +26,7 @@ add_executable(tests
     core/internal_network/socket_proxy.cpp
     core/nup_writer.cpp
     core/priority_queue.cpp
+    core/vfs_vector.cpp
     core/internal_network/network.cpp
     video_core/memory_tracker.cpp
     video_core/h264_packet.cpp
@@ -41,6 +42,7 @@ add_executable(tests
     video_core/uniform_stream_reuse.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
+    video_core/usage_tracker.cpp
     video_core/global_address_tracking.cpp
     video_core/global_atomic_routing.cpp
     video_core/nvn_storage_descriptor.cpp

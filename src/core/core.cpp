@@ -460,10 +460,14 @@ struct System::Impl {
             }
         }
 
-        perf_stats.emplace(params.program_id);
-        // Reset counters and set time origin to current frame
-        GetAndResetPerfStats();
-        perf_stats->BeginSystemFrame();
+        {
+            // Frontend timers poll GetAndResetPerfStats from their own threads.
+            std::scoped_lock lk{perf_stats_mutex};
+            perf_stats.emplace(params.program_id);
+            // Reset counters and set time origin to current frame
+            perf_stats->GetAndResetStats(core_timing.GetGlobalTimeUs());
+            perf_stats->BeginSystemFrame();
+        }
 
         const FileSys::PatchManager pm(params.program_id, system.GetFileSystemController(), system.GetContentProvider());
         auto const metadata = pm.GetControlMetadata();
@@ -512,7 +516,10 @@ struct System::Impl {
         audio_core.reset();
         gpu_core.reset();
         host1x_core.reset();
-        perf_stats.reset();
+        {
+            std::scoped_lock lk{perf_stats_mutex};
+            perf_stats.reset();
+        }
         cpu_manager.Shutdown();
         debugger.reset();
         kernel.Shutdown();
@@ -550,6 +557,7 @@ struct System::Impl {
     }
 
     PerfStatsResults GetAndResetPerfStats() {
+        std::scoped_lock lk{perf_stats_mutex};
         if (!perf_stats) {
             return {};
         }
@@ -584,6 +592,7 @@ struct System::Impl {
     std::optional<Service::KernelHelpers::ServiceContext> general_channel_context;
     std::optional<Service::Event> general_channel_event;
     std::optional<Core::PerfStats> perf_stats;
+    std::mutex perf_stats_mutex;
     std::optional<Tegra::Host1x::Host1x> host1x_core;
     std::optional<Core::DeviceMemory> device_memory;
     std::optional<AudioCore::AudioCore> audio_core;
@@ -616,9 +625,11 @@ struct System::Impl {
     std::atomic_bool is_powered_on{};
     bool is_multicore : 1 = false;
     bool extended_memory_layout : 1 = false;
-    bool exit_locked : 1 = false;
-    bool exit_requested : 1 = false;
-    bool nvdec_active : 1 = false;
+    // Separate atomics: these are set from service, NVDEC and frontend threads, and bit-fields
+    // sharing a byte lost concurrent updates.
+    std::atomic_bool exit_locked{};
+    std::atomic_bool exit_requested{};
+    std::atomic_bool nvdec_active{};
 
     void EnsureGeneralChannelInitialized(System& system) {
         if (!general_channel_event) {
