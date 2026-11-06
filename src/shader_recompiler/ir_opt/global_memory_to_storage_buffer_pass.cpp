@@ -368,8 +368,7 @@ std::optional<LowAddrInfo> TrackLowAddress(IR::Inst* inst) {
 }
 
 /// Tries to track the storage buffer address used by a global memory instruction
-std::optional<StorageBufferAddr> Track(const IR::Value& value, const Bias* bias,
-                                       std::unordered_set<const IR::Inst*>& exhausted) {
+std::optional<StorageBufferAddr> Track(const IR::Value& value, const Bias* bias) {
     const auto pred{[bias](const IR::Inst* inst) -> std::optional<StorageBufferAddr> {
         if (inst->GetOpcode() != IR::Opcode::GetCbufU32 &&
             inst->GetOpcode() != IR::Opcode::GetCbufU32x2) {
@@ -1382,13 +1381,13 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
     }
     const auto cached_track = [&](const Bias* bias, auto& cache) {
         if (low_addr.IsImmediate()) {
-            return Track(low_addr, bias, exhausted);
+            return Track(low_addr, bias);
         }
         const IR::Inst* const start{low_addr.InstRecursive()};
         if (const auto it = cache.find(start); it != cache.end()) {
             return it->second;
         }
-        const std::optional<StorageBufferAddr> result{Track(low_addr, bias, exhausted)};
+        const std::optional<StorageBufferAddr> result{Track(low_addr, bias)};
         cache.emplace(start, result);
         return result;
     };
@@ -1403,7 +1402,7 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
     }
     if (!storage_buffer) {
         // If it fails, track without a bias
-        storage_buffer = cached_track(nullptr, info.unbiased_tracks, info.unbiased_exhausted);
+        storage_buffer = cached_track(nullptr, info.unbiased_tracks);
         if (!storage_buffer) {
             // If that also fails, use NVN fallbacks
             LOG_WARNING(Shader, "Storage buffer failed to track, using global memory fallbacks");
