@@ -352,7 +352,7 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
         info.tess_spacing = key.tess_spacing;
         break;
     case Shader::Stage::Mesh:
-        info.convert_depth_mode = gl_ndc;
+        info.convert_depth_mode = key.convert_depth_mode;
         if (program.mesh.topology == 0) {
             info.fixed_state_point_size = point_size;
         }
@@ -1219,7 +1219,7 @@ bool PipelineCache::CanSkipDraw() const noexcept {
     // will be used one time.
     if (maxwell3d->regs.zeta_enable) {
         graphics_miss = "async-build";
-        return nullptr;
+        return true;
     }
     // If games are using a small index count, we can assume these are full screen quads.
     // Usually these shaders are only used once for building textures so we can assume they
@@ -1229,7 +1229,7 @@ bool PipelineCache::CanSkipDraw() const noexcept {
         return false;
     }
     graphics_miss = "async-build";
-    return nullptr;
+    return true;
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
@@ -1425,10 +1425,9 @@ std::shared_ptr<ReusableShaders> PipelineCache::BuildGraphicsShaders(
             if (reason != nullptr) {
                 LOG_WARNING(Render_Vulkan,
                             "Skipping tessellation pipeline: {} (tcs={} tes={}, tcs output "
-                            "vertices {}, patch control points {}, device max patch size {})",
+                            "vertices {}, device max patch size {})",
                             reason, control != nullptr, evaluation != nullptr,
-                            control != nullptr ? control->invocations : 0,
-                            key.state.patch_control_points_minus_one.Value() + 1, max_patch_size);
+                            control != nullptr ? control->invocations : 0, max_patch_size);
                 return nullptr;
             }
         }
