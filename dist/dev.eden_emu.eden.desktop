@@ -7,9 +7,9 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Eglantine
+Name=Eggcellent
 GenericName=Switch Emulator
-Comment=Multiplatform FOSS Switch 1 emulator written in C++, derived from Yuzu and Sudachi
+Comment=Experimental open-source Nintendo Switch 2 emulator based on Eden
 Icon=dev.eglantine.eglantine
 TryExec=eglantine
 Exec=eglantine %f

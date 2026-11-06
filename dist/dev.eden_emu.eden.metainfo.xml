@@ -13,10 +13,10 @@ SPDX-License-Identifier: CC0-1.0
 <component type="desktop-application">
   <id>dev.eden_emu.eden</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <name>eden</name>
+  <name>Eggcellent</name>
   <summary>Nintendo Switch emulator</summary>
   <description>
-    <p>Eden is a free and open-source (FOSS) Switch 1 emulator started by developer Camille LaVey. Written in C++, with builds for Windows, Linux, macOS, Android, FreeBSD and more.</p>
+    <p>Eggcellent is an experimental open-source Nintendo Switch 2 emulator based on Eden.</p>
   </description>
   <categories>
     <category>Game</category>
