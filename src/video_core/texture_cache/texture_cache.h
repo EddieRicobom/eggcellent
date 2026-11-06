@@ -292,8 +292,14 @@ void TextureCache<P>::TickFrame() {
         if (!native_thresholds_applied && gpu_memory != nullptr && gpu_memory->UsesNativeTiling()) {
             native_thresholds_applied = true;
             const u64 device_local = runtime.GetDeviceLocalMemory();
-            critical_memory = (std::max)(critical_memory, device_local - 256_MiB);
-            expected_memory = (std::max)(expected_memory, device_local - 1280_MiB);
+            // Medido em Mario Kart World, 8 GB AMD, Windows: com o alvo em device_local - 1.2 GB
+            // o cache chegava a 6.0 GB de 6.5 GB, o driver comecava a paginar e o jogo caia de
+            // 60 para 12 a 17 FPS (frame de 57 a 79 ms). Com o alvo em 60% e o critico em 75% do
+            // orcamento o mesmo trecho roda a 60 FPS (16.7 ms) e o cache fica com 3319 imagens em
+            // vez de 8010. O espaco livre abaixo disso nao fica parado: sobra para buffers, para as
+            // regioes GPU-only e para o driver.
+            critical_memory = (std::max)(critical_memory, (device_local / 4) * 3);
+            expected_memory = (std::max)(expected_memory, (device_local / 5) * 3);
             ApplyThresholdOverrides();
             native_critical_memory = critical_memory;
             native_expected_memory = expected_memory;
@@ -346,6 +352,9 @@ void TextureCache<P>::TickFrame() {
                     critical_memory =
                         budget - (std::min)(margin + pressure_margin + slack_margin, budget / 2);
                     expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
+                    // Hard cap (MKW, 8 GB: past 60%/75% of the driver budget it pages textures).
+                    critical_memory = (std::min)(critical_memory, (budget / 4) * 3);
+                    expected_memory = (std::min)(expected_memory, (budget / 5) * 3);
                     // Log the first values and real changes (the budget moves by a few MiB all
                     // the time).
                     const u64 change = critical_memory > old_critical
@@ -367,6 +376,13 @@ void TextureCache<P>::TickFrame() {
                runtime.IsFree(gpu_sentenced_images.front().tick)) {
             gpu_sentenced_bytes -= gpu_sentenced_images.front().bytes;
             gpu_sentenced_images.pop_front();
+        }
+    }
+    if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
+        const u64 budget = runtime.GetDeviceMemoryBudget();
+        if (budget > 2_GiB) {
+            expected_memory = (std::min)(expected_memory, (budget / 5) * 3);
+            critical_memory = (std::min)(critical_memory, (budget / 4) * 3);
         }
     }
     // If we can obtain the memory info, use it instead of the estimate.
