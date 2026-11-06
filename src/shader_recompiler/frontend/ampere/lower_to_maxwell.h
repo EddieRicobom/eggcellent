@@ -2416,6 +2416,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                  (u64{insn.Bits(40, 14)} << 36) | (u64{insn.Bits(90, 1)} << 49) | (u64{depth} << 50) |
                  (u64{7} << 51) | (u64{offset_mode} << 54) | (u64{insn.Bits(87, 2)} << 56));
             }
+            const u32 components = static_cast<u32>(std::popcount(mask));
             const bool split = second_dest != 255;
             for (u32 i = 0; i < components; ++i) {
                 u32 target = 255;
@@ -2648,34 +2649,6 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                  (u64{insn.Bits(62, 1)} << 49));
             break;
         }
-        case 0x324: case 0x924: { // OUT (geometry emit/cut), register or immediate stream
-            const u32 type = insn.Bits(78, 2);
-            if (!type || insn.words[2] & ~0xc000U) return fail(index, "native geometry output mode");
-            // Maxwell: output handle at 8, stream at 20, emit at 39, cut at 40.
-            const u64 handle = u64{insn.Bits(24, 8)} << 8;
-            const u64 flags = u64{type} << 39;
-            if (opcode == 0x324) {
-                emit(base(0xfbe0000000000000ULL) | handle | (u64{insn.Bits(32, 8)} << 20) | flags);
-            } else {
-                if (insn.words[1] > 0x7ffff) return fail(index, "native geometry output stream");
-                emit(base(0xf6e0000000000000ULL) | handle | (u64{insn.words[1]} << 20) | flags);
-            }
-            break;
-        }
-        case 0x34e: { // LEPC: 64-bit address of the next instruction
-            // Only seen in geometry shader prologues, where the address is consumed by opcode 0x357
-            // and the registers are overwritten right after. Native code addresses mean nothing in
-            // the lowered program, so it reads as zero.
-            if (insn.Bits(24, 8) || insn.words[1] || insn.words[2] || dest >= 254)
-                return fail(index, "native program counter load mode");
-            mov_imm(static_cast<u32>(dest), 0);
-            mov_imm(static_cast<u32>(dest) + 1, 0);
-            break;
-        }
-        case 0x357: // Takes the LEPC-derived address in geometry shader prologues; no Maxwell counterpart.
-            if (insn.Bits(16, 8) || insn.Bits(32, 32) || insn.words[2] || native_predicate != 7)
-                return fail(index, "native geometry prologue mode");
-            break;
         case 0x321: // ALD
         case 0x322: { // AST
             if (insn.Bits(76, 2) || insn.Bits(79, 1)) return fail(index, "native indexed/patch attribute access");
