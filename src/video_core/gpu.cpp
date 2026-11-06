@@ -173,6 +173,10 @@ struct GPU::Impl {
         system.GetPerfStats().EndGameFrame();
     }
 
+    void RendererFramesPresented(u32 count) {
+        system.GetPerfStats().AddPresentedFrames(count);
+    }
+
     /// Performs any additional setup necessary in order to begin GPU emulation.
     /// This can be used to launch any necessary threads and register any necessary
     /// core timing events.
@@ -521,6 +525,10 @@ bool GPU::UseNvdec() const {
 
 void GPU::RendererFrameEndNotify() {
     impl->RendererFrameEndNotify();
+}
+
+void GPU::RendererFramesPresented(u32 count) {
+    impl->RendererFramesPresented(count);
 }
 
 void GPU::Start() {

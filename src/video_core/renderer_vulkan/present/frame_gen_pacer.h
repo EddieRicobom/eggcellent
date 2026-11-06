@@ -21,6 +21,11 @@ public:
 
     void Reset();
 
+    /// Smoothed time between real frames in seconds, 0 while unknown.
+    [[nodiscard]] f32 SmoothedInterval() const {
+        return smoothed_interval;
+    }
+
 private:
     using Clock = std::chrono::steady_clock;
 
@@ -41,6 +46,7 @@ private:
     size_t probe_previous_limit{};
     size_t limit{};
     u32 probe_failures{};
+    u32 long_intervals{};
 };
 
 } // namespace Vulkan

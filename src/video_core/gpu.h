@@ -224,6 +224,9 @@ public:
 
     void RendererFrameEndNotify();
 
+    /// Counts frames sent to the host display, generated frames included.
+    void RendererFramesPresented(u32 count);
+
     void RequestComposite(std::vector<Tegra::FramebufferConfig>&& layers,
                           std::vector<Service::Nvidia::NvFence>&& fences);
 

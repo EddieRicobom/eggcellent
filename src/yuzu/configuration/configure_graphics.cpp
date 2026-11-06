@@ -16,6 +16,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QSlider>
+#include <QSpinBox>
 #include <QStringLiteral>
 #include <QtCore/qobjectdefs.h>
 #include <qabstractbutton.h>
@@ -40,6 +41,24 @@
 #ifdef HAS_RESHADE
 #include "yuzu/configuration/configure_post_processing.h"
 #endif
+
+namespace {
+
+// The editable component of a setting row, without its label or restore button.
+QWidget* SettingInput(const ConfigurationShared::Widget& widget) {
+    if (widget.combobox != nullptr) {
+        return widget.combobox;
+    }
+    if (widget.spinbox != nullptr) {
+        return widget.spinbox;
+    }
+    if (widget.slider != nullptr) {
+        return widget.slider;
+    }
+    return widget.checkbox;
+}
+
+} // Anonymous namespace
 
 ConfigureGraphics::ConfigureGraphics(
     const Core::System& system_, std::vector<VkDeviceInfo::Record>& records_,
@@ -218,7 +237,10 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
     std::map<u32, QWidget*> hold_graphics;
     std::vector<QWidget*> hold_api;
-    QCheckBox* frame_gen_checkbox = nullptr;
+    QCheckBox* frame_gen_checkbox{};
+    QCheckBox* flow_scale_auto_checkbox{};
+    QWidget* flow_scale_input{};
+    std::vector<QWidget*> frame_gen_inputs;
 
     for (const auto setting : Settings::values.linkage.by_category[Settings::Category::Renderer]) {
 #ifndef HAS_RESHADE
@@ -244,6 +266,20 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
         if (!widget->Valid()) {
             widget->deleteLater();
             continue;
+        }
+
+        if (setting->Id() == Settings::values.frame_gen.Id()) {
+            frame_gen_checkbox = widget->checkbox;
+        } else if (setting->PairedSetting() == &Settings::values.frame_gen) {
+            QWidget* const input = SettingInput(*widget);
+            if (input != nullptr) {
+                frame_gen_inputs.push_back(input);
+            }
+            if (setting->Id() == Settings::values.frame_gen_flow_scale_auto.Id()) {
+                flow_scale_auto_checkbox = widget->checkbox;
+            } else if (setting->Id() == Settings::values.frame_gen_flow_scale.Id()) {
+                flow_scale_input = input;
+            }
         }
 
         if (setting->Id() == Settings::values.renderer_backend.Id()) {
@@ -352,6 +388,26 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
     for (auto widget : hold_api) {
         api_grid_layout->addWidget(widget);
+    }
+
+    // Only the inputs are toggled: disabling a whole row would also disable its restore button,
+    // which per-game apply reads as "use global". Rows locked while a game runs stay locked.
+    if (frame_gen_checkbox != nullptr) {
+        const auto update_frame_gen_inputs = [frame_gen_checkbox, flow_scale_auto_checkbox,
+                                              flow_scale_input, frame_gen_inputs] {
+            const bool enabled = frame_gen_checkbox->isChecked();
+            for (QWidget* const input : frame_gen_inputs) {
+                input->setEnabled(enabled);
+            }
+            if (flow_scale_auto_checkbox != nullptr && flow_scale_input != nullptr) {
+                flow_scale_input->setEnabled(enabled && !flow_scale_auto_checkbox->isChecked());
+            }
+        };
+        connect(frame_gen_checkbox, &QCheckBox::toggled, this, update_frame_gen_inputs);
+        if (flow_scale_auto_checkbox != nullptr) {
+            connect(flow_scale_auto_checkbox, &QCheckBox::toggled, this, update_frame_gen_inputs);
+        }
+        update_frame_gen_inputs();
     }
 
     // Background color is too specific to build into the new system, so we manage it here

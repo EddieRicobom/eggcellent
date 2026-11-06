@@ -21,6 +21,8 @@ struct PerfStatsResults {
     double frametime;
     /// Ratio of walltime / emulated time elapsed
     double emulation_speed;
+    /// Average host presents in Hz, generated frames included (0 if the renderer does not report)
+    double presented_fps;
 };
 
 /**
@@ -37,6 +39,7 @@ public:
     void BeginSystemFrame();
     void EndSystemFrame();
     void EndGameFrame();
+    void AddPresentedFrames(u32 count);
 
     PerfStatsResults GetAndResetStats(std::chrono::microseconds current_system_time_us);
 
@@ -73,6 +76,8 @@ private:
     u32 system_frames = 0;
     /// Cumulative number of game frames (GSP frame submissions) since last reset
     std::atomic<u32> game_frames = 0;
+    /// Cumulative number of host presents, generated frames included, since last reset
+    std::atomic<u32> presented_frames = 0;
 
     /// Point when the previous system frame ended
     Clock::time_point previous_frame_end = reset_point;
@@ -82,6 +87,8 @@ private:
     Clock::duration previous_frame_length = Clock::duration::zero();
     /// Previously computed fps
     double previous_fps = 0;
+    /// Previously computed presented fps
+    double previous_presented_fps = 0;
 };
 
 class SpeedLimiter {
