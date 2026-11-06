@@ -191,6 +191,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #ifdef __unix__
 
 #include <csignal>
+#include <cstdlib>
 #include <QSocketNotifier>
 #include <sys/socket.h>
 #include "qt_common/gui_settings.h"
@@ -2423,9 +2424,17 @@ void MainWindow::OnEmulationStopTimeout() {
 
 void MainWindow::TerminateEmulationThread() {
     if (QtCommon::emu_thread && QtCommon::emu_thread->isRunning()) {
-        LOG_ERROR(Frontend, "Emulation thread failed to stop, terminating it");
-        QtCommon::emu_thread->terminate();
-        QtCommon::emu_thread->wait();
+        // QThread::terminate emits finished with the thread's mutex held and OnEmulationStopped
+        // asks isRunning on that mutex, so this froze the window for good; and a thread killed
+        // mid-shutdown leaves its locks held for the teardown after it. Nothing here can be
+        // trusted any more: keep the window settings and leave.
+        LOG_ERROR(Frontend, "Emulation thread failed to stop, exiting the process");
+        play_time_manager->Stop();
+        UpdateUISettings();
+        game_list->SaveInterfaceLayout();
+        UISettings::SaveWindowState();
+        hotkey_registry.SaveHotkeys();
+        std::_Exit(0);
     }
 }
 

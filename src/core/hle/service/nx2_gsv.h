@@ -381,11 +381,13 @@ public:
                 [this](u64 gpu_address, u64 size, const u8* data) {
                     BackSparseWrite(gpu_address, size, data);
                 });
+            Tegra::Nx2SetSparseRefill([this] { RefillSparseReserve(); });
         }
     }
 
     ~INx2GpuSession() override {
         // Waits for a backing the GPU thread may be doing.
+        Tegra::Nx2SetSparseRefill({});
         Tegra::Nx2SetSparseBacking({});
         for (auto* event : m_events) {
             if (event != nullptr) {
@@ -879,6 +881,47 @@ private:
         return std::nullopt;
     }
 
+    // GPU thread, no host lock held (see Tegra::Nx2RefillSparseReserve). Not cleared here: taking
+    // a block clears it, so waiting blocks commit nothing on the host.
+    void RefillSparseReserve() {
+        for (size_t i = 0; i < SparseReserveBatch; ++i) {
+            {
+                std::scoped_lock lk{m_region_mutex};
+                if (m_sparse_reserve_failed || m_sparse_reserve.size() >= SparseReserveBlocks) {
+                    return;
+                }
+            }
+            auto backing = AllocateGpuOnlyBacking(SparseBlockSize, false, false);
+            std::scoped_lock lk{m_region_mutex};
+            if (!backing) {
+                m_sparse_reserve_failed = true; // pool or region full: blocks map one by one, as before
+                return;
+            }
+            m_sparse_reserve.push_back(std::move(*backing));
+        }
+    }
+
+    // A block from the reserve, which never touches the guest page table, so it is safe under the
+    // texture cache lock. Mapping is left for a shorter block or an empty reserve.
+    std::optional<MappedBacking> TakeSparseBacking(u64 size) {
+        std::optional<MappedBacking> backing;
+        if (size == SparseBlockSize) {
+            std::scoped_lock lk{m_region_mutex};
+            if (!m_sparse_reserve.empty()) {
+                backing = std::move(m_sparse_reserve.back());
+                m_sparse_reserve.pop_back();
+            }
+        }
+        if (!backing) {
+            return AllocateGpuOnlyBacking(size, false, true);
+        }
+        for (const auto& block : *backing->pages) {
+            system.DeviceMemory().buffer.ClearBackingRegion(
+                GetInteger(block.GetAddress()) - Core::DramMemoryMap::Base, block.GetSize(), 0);
+        }
+        return backing;
+    }
+
     // Records a mapped backing for the region at gpu_address. Needs m_region_mutex.
     void RegisterGpuOnlyBacking(u64 gpu_address, MappedBacking&& backing) {
         // A title may create the same region again from the same start with a different size
@@ -991,7 +1034,7 @@ private:
                     block_size = (std::min)(SparseBlockSize, it->second.size - block * SparseBlockSize);
                 }
             }
-            auto backing = AllocateGpuOnlyBacking(block_size, false, true);
+            auto backing = TakeSparseBacking(block_size);
             bool stale = false;
             {
                 std::scoped_lock lk{m_region_mutex};
@@ -1420,6 +1463,11 @@ private:
     u64 m_gpu_only_tile_max{};   ///< Largest such tile, bounds the search
     u64 m_gpu_only_tile_bytes{}; ///< GPU-only region memory the game maps right now
     std::vector<ReleasedRegion> m_released_regions;
+    // Title 4 backs about one block every 8 s (64 in 498 s); 16 cover bursts between two frames.
+    static constexpr size_t SparseReserveBlocks = 16;
+    static constexpr size_t SparseReserveBatch = 4; ///< Per frame, so the GPU thread never maps many
+    std::vector<MappedBacking> m_sparse_reserve; ///< Needs m_region_mutex
+    bool m_sparse_reserve_failed{}; ///< Needs m_region_mutex
 
     struct GpuMemory {
         u64 address;

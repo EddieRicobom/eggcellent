@@ -211,6 +211,29 @@ inline void Nx2BackSparseWrite(u64 gpu_address, u64 size, const void* data) {
     }
 }
 
+// Keeps a few sparse blocks already mapped. The texture cache writes to sparse memory holding its
+// lock, and the emulated cores wait on that lock in their memory accesses: mapping there waits on the
+// guest page table, whose holder needs one of those cores, and the whole game freezes. The GPU thread
+// refills the reserve with no host lock held. Its own mutex: a core may wait on the backing mutex.
+using Nx2SparseRefillHandler = std::function<void()>;
+inline std::mutex g_nx2_sparse_refill_mutex;
+inline Nx2SparseRefillHandler g_nx2_sparse_refill;
+
+inline void Nx2SetSparseRefill(Nx2SparseRefillHandler handler) {
+    std::scoped_lock lk{g_nx2_sparse_refill_mutex};
+    g_nx2_sparse_refill = std::move(handler);
+}
+
+inline void Nx2RefillSparseReserve() {
+    if (g_nx2_sparse_high.load(std::memory_order_relaxed) == 0) [[likely]] {
+        return; // no lazily backed region yet
+    }
+    std::scoped_lock lk{g_nx2_sparse_refill_mutex};
+    if (g_nx2_sparse_refill) {
+        g_nx2_sparse_refill();
+    }
+}
+
 // Which blocks of each sparse region have been written (got memory), for the texture cache: an
 // image over blocks nobody wrote is all zeros and needs no device memory. Its own lock, taken last:
 // the texture cache asks with its lock held, and nx2:gpu updates it holding only its region mutex.

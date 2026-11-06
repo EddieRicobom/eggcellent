@@ -2790,6 +2790,8 @@ void RasterizerVulkan::TickFrame() {
     descriptor_buffer_ring.TickFrame();
     fence_manager.TickFrame();
     staging_pool.TickFrame();
+    // Before the lock: the collector below may write to sparse memory holding it.
+    Tegra::Nx2RefillSparseReserve();
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.TickFrame();
