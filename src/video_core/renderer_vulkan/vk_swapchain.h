@@ -38,7 +38,8 @@ public:
 
     /// Acquires the next image in the swapchain, waits as needed.
     /// `may_flush`: false on the async present thread (see Scheduler::Wait).
-    bool AcquireNextImage(bool may_flush = true);
+    /// `pace`: false for generated frames, so the frame pacing target only counts real frames.
+    bool AcquireNextImage(bool may_flush = true, bool pace = true);
 
     /// Presents the rendered image to the swapchain.
     void Present(VkSemaphore render_semaphore);
@@ -141,6 +142,7 @@ private:
     VkFormat image_view_format{};
     VkExtent2D extent{};
     VkPresentModeKHR present_mode{};
+    VkPresentModeKHR logged_present_mode{VK_PRESENT_MODE_MAX_ENUM_KHR};
     VkSurfaceFormatKHR surface_format{};
     bool has_imm{false};
     bool has_mailbox{false};

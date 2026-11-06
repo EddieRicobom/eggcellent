@@ -6,17 +6,24 @@
 #endif
 
 #include <algorithm>
+#include <cstdlib>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/logging.h"
 #include "common/settings.h"
+#include "video_core/frame_gen/lossless_dll.h"
 #include "video_core/renderer_vulkan/present/frame_gen.h"
 #include "video_core/renderer_vulkan/present/util.h"
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 
 namespace Vulkan {
@@ -46,6 +53,48 @@ constexpr u32 LSFG_RECURRENCE_FRAMES = 2;
     constexpr f32 FLOW_SCALE_STEPS = 20.0f;
     const f32 stepped = std::ceil(ratio * FLOW_SCALE_STEPS) / FLOW_SCALE_STEPS;
     return std::clamp(stepped, 0.25f, 1.0f);
+}
+
+[[nodiscard]] std::string_view LosslessStatusName(VideoCore::FrameGen::LosslessStatus status) {
+    using VideoCore::FrameGen::LosslessStatus;
+    switch (status) {
+    case LosslessStatus::Ok:
+        return "ok";
+    case LosslessStatus::NotInstalled:
+        return "not installed";
+    case LosslessStatus::UnreadableFile:
+        return "unreadable";
+    case LosslessStatus::NotPortableExecutable:
+        return "not a valid DLL";
+    case LosslessStatus::MissingShaders:
+        return "shaders missing";
+    case LosslessStatus::TranslationFailed:
+        return "shader translation failed";
+    case LosslessStatus::CacheUnusable:
+        return "shader cache unusable";
+    }
+    return "unknown";
+}
+
+// Mirrors the requirements checked by LsfgShaders.
+[[nodiscard]] std::string LsfgUnavailableReason(const Device& device) {
+    if (!device.IsVulkanMemoryModelSupported()) {
+        return "the Vulkan memory model is not supported";
+    }
+    if (!device.HasNullDescriptor()) {
+        return "null descriptors are not supported";
+    }
+    if (!device.IsFloat16Supported()) {
+        return "shaderFloat16 is not enabled (driver workarounds turn it off on some GPUs)";
+    }
+    const VideoCore::FrameGen::LosslessStatus status =
+        VideoCore::FrameGen::GetInstalledLosslessStatus();
+    if (status != VideoCore::FrameGen::LosslessStatus::Ok) {
+        return fmt::format("Lossless.dll ({}): {}",
+                           Common::FS::PathToUTF8String(VideoCore::FrameGen::GetLosslessDllPath()),
+                           LosslessStatusName(status));
+    }
+    return "its shaders could not be loaded";
 }
 
 bool IsBlueFirst(VkFormat format) {
@@ -201,39 +250,75 @@ FrameGen::~FrameGen() = default;
 void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
                        VkExtent2D guest_extent) {
     generated = false;
+    usable = false;
 
-    if (!shaders) {
-        shaders.emplace(device);
-    }
-
-    if (unavailable || !Settings::values.frame_gen.GetValue()) {
-        if (chain || fsr3_chain) {
-            scheduler.Finish();
-            chain.reset();
-            fsr3_chain.reset();
+    if (!Settings::values.frame_gen.GetValue()) {
+        ReleaseChains();
+        // Load the LSFG shaders again next time, in case Lossless.dll was installed meanwhile.
+        if (shaders && !shaders->IsValid()) {
+            shaders.reset();
+        }
+        if (EnterState(State::Disabled)) {
+            LOG_INFO(Render_Vulkan, "Frame generation is disabled");
         }
         warm_streak = 0;
         return;
     }
 
-    if (!shaders->IsValid() && Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Fsr3) {
-        unavailable = true;
-        return;
+    const Settings::FrameGenType type = Settings::values.frame_gen_type.GetValue();
+    const bool use_fsr3 = type == Settings::FrameGenType::Fsr3;
+    if (use_fsr3) {
+        if (!fsr3_supported) {
+            fsr3_supported = Fsr3FrameGen::IsSupported(device);
+        }
+        if (!*fsr3_supported) {
+            ReleaseChains();
+            if (EnterState(State::Fsr3Unsupported)) {
+                LOG_WARNING(Render_Vulkan, "FSR 3 frame generation is unavailable: the device "
+                                           "lacks shaderStorageImageWriteWithoutFormat");
+            }
+            warm_streak = 0;
+            return;
+        }
+    } else {
+        if (!shaders) {
+            shaders.emplace(device);
+        }
+        if (!shaders->IsValid()) {
+            ReleaseChains();
+            if (EnterState(State::LsfgUnavailable)) {
+                LOG_WARNING(Render_Vulkan, "Lossless Scaling frame generation is unavailable: {}",
+                            LsfgUnavailableReason(device));
+            }
+            warm_streak = 0;
+            return;
+        }
     }
 
     if (!frame->storage_view) {
+        if (EnterState(State::NoStorage)) {
+            LOG_WARNING(Render_Vulkan,
+                        "Frame generation is inactive: present frames have no storage view "
+                        "(format {}, storage image support {})",
+                        string_VkFormat(format), frame->storage_capable);
+        }
         warm_streak = 0;
         return;
     }
+    void(EnterState(State::Active));
+    usable = true;
 
     peak_guest_extent.width = std::max(peak_guest_extent.width, guest_extent.width);
     peak_guest_extent.height = std::max(peak_guest_extent.height, guest_extent.height);
 
     const VkExtent2D extent{.width = frame->width, .height = frame->height};
-    const f32 flow_scale = ConfiguredFlowScale(peak_guest_extent, extent);
-    if ((!chain && !fsr3_chain) || built_extent.width != extent.width || built_extent.height != extent.height ||
-        built_format != format || built_flow_scale != flow_scale) {
-        Rebuild(device, extent, format, flow_scale);
+    // FSR 3 measures motion itself; the flow scale only configures the LSFG chain.
+    const f32 flow_scale = use_fsr3 ? 1.0f : ConfiguredFlowScale(peak_guest_extent, extent);
+    const bool has_chain = use_fsr3 ? fsr3_chain.has_value() : chain.has_value();
+    if (!has_chain || built_type != type || built_extent.width != extent.width ||
+        built_extent.height != extent.height || built_format != format ||
+        built_flow_scale != flow_scale) {
+        Rebuild(device, extent, format, flow_scale, type);
     }
 
     const u64 count = frame_count++;
@@ -244,12 +329,11 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
     warm_streak = warm ? warm_streak + 1 : 0;
     generated = warm && warm_streak >= LSFG_RECURRENCE_FRAMES && plan.generations > 0;
 
-    const bool use_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
-
-    if (use_fsr3 && fsr3_chain) {
+    if (use_fsr3) {
         scheduler.RequestOutsideRenderPassOperationContext();
-        fsr3_chain->Process(device, scheduler, *frame->image, *frame->storage_view, count);
-    } else if (chain) {
+        fsr3_chain->Process(scheduler, *frame->image);
+        generated = generated && fsr3_chain->HasFlow();
+    } else {
         scheduler.RequestOutsideRenderPassOperationContext();
         scheduler.Record([this, source = *frame->image, extent, count,
                           dispatch = warm](vk::CommandBuffer cmdbuf) {
@@ -270,7 +354,9 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
 }
 
 size_t FrameGen::WantedGenerations(size_t capacity) {
-    if (unavailable) {
+    // Decided by the previous Process; while frame generation cannot run, keep the pacer idle.
+    if (!usable) {
+        pacer.Reset();
         plan = {};
         return 0;
     }
@@ -282,15 +368,28 @@ size_t FrameGen::GeneratedFrameCount() const {
     return generated ? last_generations : 0;
 }
 
-void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t generation) {
-    const bool use_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
+void FrameGen::LimitGenerations(size_t count) {
+    last_generations = std::min(last_generations, count);
+}
 
-    if (use_fsr3 && fsr3_chain) {
+std::chrono::steady_clock::duration FrameGen::PresentStep(size_t generated_frames) const {
+    // EDEN_FRAME_GEN_NO_PACING presents generated frames back to back, as before.
+    static const bool no_pacing = std::getenv("EDEN_FRAME_GEN_NO_PACING") != nullptr;
+    const f32 interval = pacer.SmoothedInterval();
+    if (no_pacing || generated_frames == 0 || interval <= 0.0f) {
+        return {};
+    }
+    return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<f32>(interval / static_cast<f32>(generated_frames + 1)));
+}
+
+void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t generation) {
+    if (fsr3_chain) {
         const f32 blend = static_cast<f32>(generation + 1) / static_cast<f32>(last_generations + 1);
-        const f32 flow_scale = ConfiguredFlowScale(peak_guest_extent, built_extent);
 
         scheduler.RequestOutsideRenderPassOperationContext();
-        fsr3_chain->Generate(device, scheduler, *destination->storage_view, blend, flow_scale);
+        fsr3_chain->Generate(device, scheduler, *destination->image, *destination->storage_view,
+                             destination->index, blend);
     } else if (chain) {
         chain->SetTarget(device, last_generations, generation, destination->index,
                          *destination->storage_view);
@@ -307,18 +406,38 @@ void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t gen
     }
 }
 
-void FrameGen::Rebuild(const Device& device, VkExtent2D extent, VkFormat format, f32 flow_scale) {
-    scheduler.Finish();
-    chain.reset();
-    fsr3_chain.reset();
+bool FrameGen::EnterState(State next) {
+    const bool changed = state != next;
+    state = next;
+    return changed;
+}
+
+void FrameGen::ReleaseChains() {
+    if (chain || fsr3_chain) {
+        scheduler.Finish();
+        chain.reset();
+        fsr3_chain.reset();
+    }
+}
+
+void FrameGen::Rebuild(const Device& device, VkExtent2D extent, VkFormat format, f32 flow_scale,
+                       Settings::FrameGenType type) {
+    ReleaseChains();
 
     built_flow_scale = flow_scale;
 
-    if (Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3) {
+    LOG_INFO(Render_Vulkan,
+             "Frame generation: building {} chain, {}x{} {}, multiplier {}x, target rate {}",
+             Settings::CanonicalizeEnum(type), extent.width, extent.height,
+             string_VkFormat(format), Settings::FrameGenMultiplier(),
+             Settings::values.frame_gen_target_rate.GetValue());
+
+    if (type == Settings::FrameGenType::Fsr3) {
         fsr3_chain.emplace(device, memory_allocator, extent, format);
     } else {
         chain.emplace(device, memory_allocator, *shaders, extent, format, built_flow_scale);
     }
+    built_type = type;
     built_extent = extent;
     built_format = format;
     frame_count = 0;

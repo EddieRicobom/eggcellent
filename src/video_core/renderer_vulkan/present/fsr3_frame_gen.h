@@ -20,32 +20,40 @@ class Scheduler;
 /// to synthesize intermediate frames without requiring engine motion vectors.
 ///
 /// Optimizations:
-///  - Quarter-resolution optical flow (16├ù fewer compute invocations)
+///  - Half-resolution optical flow (4x fewer compute invocations)
 ///  - Shared-memory tile caching in both shaders
 ///  - Early-out for static pixels (skip diamond search)
-///  - Duplicate-frame detection (skip optical flow entirely)
 ///  - Precise pipeline barriers instead of full-pipeline TransitionImageLayout
-///  - Descriptor-write caching (only update when image views change)
 class Fsr3FrameGen {
 public:
     explicit Fsr3FrameGen(const Device& device, MemoryAllocator& memory_allocator,
                           VkExtent2D extent, VkFormat format);
     ~Fsr3FrameGen();
 
-    void Process(const Device& device, Scheduler& scheduler, VkImage current_frame,
-                 VkImageView current_view, u64 frame_count);
+    /// The interpolation pass stores to swapchain-format frames without a format qualifier.
+    [[nodiscard]] static bool IsSupported(const Device& device);
 
-    void Generate(const Device& device, Scheduler& scheduler, VkImageView destination_storage_view,
-                  float blend_factor, float flow_scale);
+    /// Records the copy of a new real frame and the optical flow against the previous one.
+    void Process(Scheduler& scheduler, VkImage current_frame);
 
-    [[nodiscard]] bool IsReady() const {
-        return m_initialized && m_has_history;
+    /// Records an interpolated frame between the previous and the current real frame.
+    /// The descriptor set of destination_index is rewritten, so that frame must be idle.
+    void Generate(const Device& device, Scheduler& scheduler, VkImage destination,
+                  VkImageView destination_storage_view, u32 destination_index,
+                  float blend_factor);
+
+    /// True once two real frames were processed and generated frames are meaningful.
+    [[nodiscard]] bool HasFlow() const {
+        return m_flow_valid;
     }
 
 private:
+    static constexpr size_t FRAME_SLOTS = 2;
+
     void CreateResources(const Device& device);
     void CreateShaders(const Device& device);
     void CreatePipelines(const Device& device);
+    void WriteFlowDescriptorSets(const Device& device);
 
     MemoryAllocator& m_allocator;
     VkExtent2D m_extent;
@@ -65,30 +73,21 @@ private:
     vk::Pipeline m_interp_pipeline;
 
     vk::DescriptorPool m_desc_pool;
+    // One flow set per slot holding the current frame; never rewritten
     vk::DescriptorSets m_flow_desc_sets;
+    // One interpolation set per present frame index
     vk::DescriptorSets m_interp_desc_sets;
 
-    // History and motion vector images
-    vk::Image m_history_image;
-    vk::ImageView m_history_view;
+    // Copies of the last two real frames, ping-ponged so the previous one survives
+    std::array<vk::Image, FRAME_SLOTS> m_frame_images;
+    std::array<vk::ImageView, FRAME_SLOTS> m_frame_views;
+    size_t m_current_slot{};
 
     vk::Image m_motion_image;
     vk::ImageView m_motion_view;
 
-    // Store the last current-frame view for descriptor caching
-    vk::Image m_current_image;
-    vk::ImageView m_current_view;
-
-    bool m_initialized{};
     bool m_has_history{};
-
-    // Duplicate-frame detection: skip optical flow when the frame hasn't changed
-    u64 m_last_frame_count{};
     bool m_flow_valid{};
-
-    // Descriptor caching: only update when views change
-    VkImageView m_cached_flow_current_view{VK_NULL_HANDLE};
-    VkImageView m_cached_interp_dest_view{VK_NULL_HANDLE};
 };
 
 } // namespace Vulkan

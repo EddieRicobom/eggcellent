@@ -4509,6 +4509,9 @@ void MainWindow::UpdateStatusBar() {
     }
 
     QString fpsText = tr("Game: %1 FPS").arg(std::round(results.average_game_fps), 0, 'f', 0);
+    if (Settings::values.frame_gen.GetValue() && results.presented_fps > 0.0) {
+        fpsText += tr(" (%1 presented)").arg(std::round(results.presented_fps), 0, 'f', 0);
+    }
     if (!m_fpsSuffix.isEmpty())
         fpsText = fpsText % QStringLiteral(" (%1)").arg(m_fpsSuffix);
 

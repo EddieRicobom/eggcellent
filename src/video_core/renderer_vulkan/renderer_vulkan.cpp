@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -199,6 +200,10 @@ try
         LOG_INFO(Render_Vulkan, "AMD proprietary driver: Switch 2 sparse regions are backed whole");
     }
 
+#ifndef HAS_LSFG
+    LOG_INFO(Render_Vulkan, "Frame generation is not available in this build (ENABLE_LSFG off)");
+#endif
+
     Report();
 } catch (const vk::Exception& exception) {
     LOG_ERROR(Render_Vulkan, "Vulkan initialization failed with error: {}", exception.what());
@@ -207,6 +212,9 @@ try
 
 RendererVulkan::~RendererVulkan() {
     scheduler.RegisterOnSubmit([] {});
+    scheduler.WaitWorker();
+    // The present thread may still be submitting and presenting.
+    present_manager.StopPresentThread();
     void(device.GetLogical().WaitIdle());
 }
 
@@ -222,6 +230,11 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     }
 
     RenderScreenshot(framebuffers);
+#if defined(HAS_LSFG) && !defined(__ANDROID__)
+    if (!Settings::values.frame_gen.GetValue()) {
+        present_manager.StopFrameGenPresentThread();
+    }
+#endif
     Frame* frame = present_manager.GetRenderFrame();
 
     scheduler.RequestOutsideRenderPassOperationContext();
@@ -236,14 +249,33 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     frame_gen.Process(device, frame, present_manager.SwapchainImageFormat(),
                       GuestExtent(framebuffers));
 
-    const size_t generated_frames = frame_gen.GeneratedFrameCount();
+    size_t generated_frames = frame_gen.GeneratedFrameCount();
+    if (generated_frames > 0) {
+#ifndef __ANDROID__
+        // Spacing generated frames on the render thread would block emulation on every vblank.
+        present_manager.StartPresentThread();
+#endif
+        // Generated frames only go out when they can't hold back the real frame rate.
+        generated_frames = present_manager.GeneratedFramesAllowed(generated_frames);
+        frame_gen.LimitGenerations(generated_frames);
+    }
+    // Generated frames (and then the real one) are spread over a real frame interval instead of
+    // being presented back to back. The present thread waits for each present_after.
+    const auto present_step = frame_gen.PresentStep(generated_frames);
+    auto present_time = std::chrono::steady_clock::now();
     for (size_t generation = 0; generation < generated_frames; ++generation) {
         Frame* generated = present_manager.GetRenderFrame();
+        generated->generated = true;
+        generated->present_after = present_time;
+        present_time += present_step;
         blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
         frame_gen.GenerateInto(device, generated, generation);
         scheduler.Flush(*generated->render_ready);
         present_manager.Present(generated);
+        // Hands the frame to the present thread now instead of after the next one is generated.
+        scheduler.DispatchWork();
     }
+    frame->present_after = present_time;
 #endif
 
     scheduler.Flush(*frame->render_ready);
@@ -254,6 +286,8 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
 #endif
 
     gpu.RendererFrameEndNotify();
+    // Generated frames the present thread dropped are not counted.
+    gpu.RendererFramesPresented(present_manager.TakePresentedFrames());
     rasterizer.TickFrame();
 }
 

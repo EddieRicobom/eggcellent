@@ -49,7 +49,19 @@ static VkPresentModeKHR ChooseSwapPresentMode(bool has_imm, bool has_mailbox,
         // Choose Mailbox or Immediate if unlocked and those modes are supported
         const auto mode = Settings::values.vsync_mode.GetValue();
         if (Settings::values.frame_gen.GetValue()) {
+#ifndef __ANDROID__
+            // Frame generation always runs the present thread, which spaces generated frames
+            // itself. Immediate would tear them; Mailbox keeps that spacing without tearing or
+            // blocking the thread on vblank.
+            if (mode == Settings::VSyncMode::Immediate) {
+                return has_mailbox ? Settings::VSyncMode::Mailbox : Settings::VSyncMode::Fifo;
+            }
+            return mode;
+#else
+            // Without the present thread generated frames go out back to back, and FIFO gives
+            // each its own refresh. Android keeps FIFO as before.
             return mode == Settings::VSyncMode::FifoRelaxed ? mode : Settings::VSyncMode::Fifo;
+#endif
         }
         if (Settings::values.use_speed_limit.GetValue() &&
             Settings::values.current_speed_mode.GetValue() != Settings::SpeedMode::Turbo) {
@@ -158,7 +170,7 @@ void Swapchain::Create(
     resource_ticks.resize(image_count);
 }
 
-bool Swapchain::AcquireNextImage(bool may_flush) {
+bool Swapchain::AcquireNextImage(bool may_flush, bool pace) {
     const VkResult result = device.GetLogical().AcquireNextImageKHR(
         *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
         VK_NULL_HANDLE, &image_index);
@@ -179,7 +191,11 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
         break;
     }
 
-    const auto wait_with_frame_pacing = [this, may_flush] {
+    const auto wait_with_frame_pacing = [this, may_flush, pace] {
+    if (!pace) {
+        scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
+        return;
+    }
     switch (Settings::values.frame_pacing_mode.GetValue()) {
     case Settings::FramePacingMode::Target_Auto:
         scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
@@ -209,7 +225,9 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
     wait_with_frame_pacing();
 #endif
 
-    resource_ticks[image_index] = scheduler.CurrentTick();
+    // The present thread (may_flush false) presents frames the render thread already flushed. Its
+    // current tick is one the render thread is still recording, and waiting on it would spin.
+    resource_ticks[image_index] = may_flush ? scheduler.CurrentTick() : scheduler.CurrentTick() - 1;
 
     return is_suboptimal || is_outdated;
 }
@@ -341,6 +359,12 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
 
     images = swapchain.GetImages();
     image_count = static_cast<u32>(images.size());
+
+    if (present_mode != logged_present_mode) {
+        LOG_INFO(Render_Vulkan, "Swapchain: {}x{}, {} images, present mode {}", extent.width,
+                 extent.height, image_count, string_VkPresentModeKHR(present_mode));
+        logged_present_mode = present_mode;
+    }
 #ifdef __ANDROID__
     // Android is already ordered the same as Switch.
     image_view_format = VK_FORMAT_R8G8B8A8_UNORM;
