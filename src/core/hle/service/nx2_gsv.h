@@ -1747,9 +1747,7 @@ private:
             frames_ahead = 0;
         }
         const auto entered = std::chrono::steady_clock::now();
-        if (two_ahead) {
-            WaitForFrame(m_older_fence_id, m_older_fence_value);
-        } else if (frames_ahead == 1 ||
+        if (frames_ahead == 1 ||
                    (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {
             LOG_DEBUG(Service, "nx2:vi2 present #{} fence ({}, {:#x}), waiting for ({}, {:#x}); now {:#x}",
                       m_presents, ~w[22], w[24], m_previous_fence_id, m_previous_fence_value,
@@ -1776,9 +1774,6 @@ private:
         m_previous_fence_id = ~w[22];
         m_previous_fence_value = w[24];
         const auto waited = std::chrono::steady_clock::now();
-        if (two_ahead && waited - entered > std::chrono::milliseconds{100}) {
-            m_smooth_cooldown = 300;
-        }
         Composite(w[5], ~w[22], w[24], w[7]);
         const auto composited = std::chrono::steady_clock::now();
         PaceToVblank(w[12]);
@@ -1807,10 +1802,6 @@ private:
                 m_stats.hitches += frame > 100'000 ? 1 : 0;
             }
             m_stats.last_present = entered;
-            // Game time: each present advances the game by its interval in vblanks (MKW counts
-            // 1 or 2 a frame), so vblanks per second against 60 is the game's speed.
-            m_stats.vblanks += m_present_interval;
-            m_stats.double_frames += m_present_interval > 1 ? 1 : 0;
             if (++m_stats.presents == 600) {
                 const double seconds = static_cast<double>(m_stats.frame_us) / 1e6;
                 LOG_INFO(Service,
