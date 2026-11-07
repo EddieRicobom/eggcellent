@@ -142,43 +142,9 @@ public:
 private:
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
-    /// FixedPipelineState::Refresh of graphics_key, keeping only the vertex attribute types the
-    /// bound programs read (see VideoCommon::KeyedAttributeTypes).
-    void RefreshGraphicsKey();
-
-    /// EDEN_NX2_PIPELINE_CLEAN / EDEN_NX2_EXP19: CurrentGraphicsPipeline without
-    /// FixedPipelineState::Refresh nor the key comparison while nothing Refresh reads changed
-    /// since the last lookup. `patch`: EXP19=2.
-    [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineClean(bool patch);
-    /// The registers Refresh reads with these features, as (first word, words) ranges.
-    void BuildCleanWatch(bool patch);
-    [[nodiscard]] bool CleanInputsUnchanged() const;
-    void TakeCleanSnapshot();
-
-    struct CleanLookup {
-        struct Range {
-            u32 first;
-            u32 count;
-        };
-        bool built{};
-        bool patch{};                  ///< Built for CurrentGraphicsPipelineClean(true)
-        std::vector<Range> ranges;     ///< Read by every Refresh
-        std::vector<Range> xfb_ranges; ///< Read while transform feedback is enabled
-        std::vector<u32> snapshot;     ///< ranges' words at the last Refresh
-        std::vector<u32> xfb_snapshot;
-        std::array<u64, 6> hashes{};   ///< graphics_key.unique_hashes at the last Refresh
-        const Tegra::Engines::Maxwell3D* maxwell3d{};
-        Maxwell::PrimitiveTopology topology{};
-        Tegra::Engines::Maxwell3D::EngineHint engine_state{};
-        /// current_pipeline when its key was graphics_key after the last Refresh, else null.
-        GraphicsPipeline* pipeline{};
-        u64 hits{};
-        u64 patches{};
-        u64 misses{};
-        std::chrono::steady_clock::time_point last_log{};
-    } clean;
-
-    [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) const noexcept;
+    /// Returns `pipeline` when it is built or its draw must wait for it, nullptr when the draw
+    /// may be skipped while it builds (asynchronous shaders, CanDiscardPendingDraw).
+    [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) noexcept;
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
 
@@ -240,6 +206,10 @@ private:
     /// Destroys graphics pipelines unused for a while, once the GPU is done with them.
     void EvictUnusedPipelines();
     u64 frame_count{};
+    /// Wait budget of native draws for unbuilt pipelines left in this frame, in microseconds
+    /// (native_async_draws = Bounded). Only touched on the GPU thread; reset in TickFrame.
+    s64 native_wait_budget_us{8000};
+    s64 native_wait_used_us{}; ///< Budget spent since the last 10 s log line.
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
 
