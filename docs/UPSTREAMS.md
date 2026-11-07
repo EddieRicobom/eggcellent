@@ -14,6 +14,7 @@ mudanças, o que olhar em cada um e como trazê-las para a `main`.
 | Média | [zortos293/Lichii](https://github.com/zortos293/Lichii) | PRs mergeados e commits | Fonte dos merges do Frizti. |
 | Média | [sylvieistaken/selevet-eglantine](https://github.com/sylvieistaken/selevet-eglantine) | Releases `selevet-eglantine-performance-N` | Ganhos de GPU portados de várias forks. |
 | Baixa | [PokeDinner-a-Eglantine-Fork](https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork) (Forgejo) | Branch `master` e PRs | Mouse do Joy-Con 2, DK Bananza e Mario Kart World. Já mesclado uma vez. |
+| Baixa | [MythosOfs/Orchid](https://github.com/MythosOfs/Orchid) | Branch `main`, PRs e docs de desempenho (Hyrule, Pokopia, Bananza) | Emulador de Switch 2 experimental, sem histórico comum com o Eglantine. Só serve para ler diagnósticos e portar ideias, não para merge. |
 | Baixa | [nemyu-emulator/nemyu](https://gitlab.com/nemyu-emulator/nemyu) (GitLab) | Releases e changelog | Origem do frame generation já portado. |
 | Só por PR | [A-Man-With-A-Plan-dev/Eglantine](https://github.com/A-Man-With-A-Plan-dev/Eglantine) | Branches e PRs | Autor do trabalho de shader do OOT (PR 614). |
 
