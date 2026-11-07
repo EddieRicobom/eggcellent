@@ -23,7 +23,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -106,10 +106,10 @@ jobs:
       contents: write
     steps:
       - name: Check out license files
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Download Windows binary
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: eggcellent-windows-x86_64-${{ github.sha }}
           path: artifacts
