@@ -1998,35 +1998,28 @@ void PipelineCache::EvictUnusedPipelines() {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
-    // A pipeline built from the disk cache at boot that no draw has used yet stays, up to a budget
-    // (from zortos293/Lichii#550): evicting it throws the prebuild away, and the game translates it
-    // again on the GPU thread when it reaches that content. Past the budget (~0.9 GB of driver
-    // memory) they go like the rest, so a large cache can't hold their memory all session.
+    const u64 tick = scheduler.CurrentTick();
+    // ~0.9 GB of driver memory at ~0.45 MB each.
     constexpr size_t MaxUnusedPrebuiltPipelines = 2000;
     size_t kept_prebuilt = 0;
-    std::vector<std::pair<u64, GraphicsPipelineCacheKey>> candidates;
-    for (const auto& [key, pipeline] : graphics_cache) {
-        if (pipeline == nullptr || pipeline.get() == current_pipeline || !pipeline->IsBuilt() ||
+    size_t evicted = 0;
+    for (auto it = graphics_cache.begin(); it != graphics_cache.end();) {
+        GraphicsPipeline* const pipeline = it->second.get();
+        if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
             pipeline->LastUse() >= cutoff) {
             continue;
         }
+        // A pipeline built from the disk cache at boot that no draw has used yet stays, up to a
+        // budget: evicting it throws the prebuild away, and the game translates it again on the
+        // GPU thread when it reaches that content (OoT: 1174 of 1346 evicted on the title screen,
+        // 684 rebuilt in 10 s on entering the field). Past the budget they go like the rest, so a
+        // large cache can't hold their driver memory for the whole session.
         if (!pipeline->WasUsed() && kept_prebuilt < MaxUnusedPrebuiltPipelines) {
             ++kept_prebuilt;
+            ++it;
             continue;
         }
-        candidates.emplace_back(pipeline->LastUse(), key);
-    }
-    const size_t evicted = VideoCommon::GraphicsPipelinesToEvict(graphics_cache.size(),
-                                                                 candidates.size(), evict_above);
-    if (evicted == 0) {
-        return;
-    }
-    std::nth_element(candidates.begin(), candidates.begin() + (evicted - 1), candidates.end(),
-                     [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-    const u64 tick = scheduler.CurrentTick();
-    for (size_t i = 0; i < evicted; ++i) {
-        const auto it = graphics_cache.find(candidates[i].second);
-        if (used_this_session.erase(it->second.get()) != 0) {
+        if (used_this_session.erase(pipeline) != 0) {
             used_and_evicted.insert(it->first.Hash());
         }
         evicted_pipelines.emplace_back(tick, std::move(it->second));
