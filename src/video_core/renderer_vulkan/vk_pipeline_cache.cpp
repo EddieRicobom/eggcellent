@@ -30,6 +30,7 @@
 #include "core/core.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/environment.h"
+#include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/ir_opt/passes.h"
@@ -1432,9 +1433,8 @@ namespace {
 /// Which pointer slots a native program's arguments fill depends on the area (Ocarina of Time's
 /// foliage culling fills different list slots in Hyrule Field and Castle Town), so a translation
 /// rebuilt in one area may lack pointers the first cached one binds. Try first the translations
-/// that bind every pointer the first one binds, those binding the most first and the newest of
-/// those binding as many (an older one can be from a translator that asked about fewer slots, and
-/// fail), then the others in cache order.
+/// that bind every pointer the first one binds, those binding the most first, then the others in
+/// cache order.
 void OrderComputeTranslations(std::vector<FileEnvironment>& candidates) {
     if (candidates.size() < 2) {
         return;
@@ -1454,13 +1454,7 @@ void OrderComputeTranslations(std::vector<FileEnvironment>& candidates) {
         if (lhs_keeps != keeps_first(rhs)) {
             return lhs_keeps;
         }
-        if (!lhs_keeps) {
-            return false;
-        }
-        if (keys[lhs].size() != keys[rhs].size()) {
-            return keys[lhs].size() > keys[rhs].size();
-        }
-        return lhs > rhs;
+        return lhs_keeps && keys[lhs].size() > keys[rhs].size();
     });
     std::vector<FileEnvironment> ordered;
     ordered.reserve(candidates.size());
@@ -1608,10 +1602,6 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     // loading only ever adds entries (see OrderComputeTranslations), and take the next when a
     // translation fails.
     ::Common::unordered_map<ComputePipelineCacheKey, std::vector<FileEnvironment>> compute_envs;
-    // The same for graphics: a pipeline whose record failed to load is stored again when the GPU
-    // thread builds it, and its records are tried newest first.
-    std::vector<std::pair<GraphicsPipelineCacheKey, GraphicsRecords>> graphics_records;
-    ::Common::unordered_map<GraphicsPipelineCacheKey, size_t> graphics_record_index;
 
     if (device.IsKhrPipelineExecutablePropertiesEnabled()) {
         state.statistics = std::make_unique<PipelineStatistics>(device);
@@ -1737,12 +1727,6 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }};
     VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION, load_compute,
                                load_graphics);
-    for (auto& [key, records] : graphics_records) {
-        std::ranges::reverse(records);
-        queue_graphics(key, std::move(records));
-    }
-    graphics_records.clear();
-    graphics_record_index.clear();
     for (auto& [key, candidates] : compute_envs) {
         OrderComputeTranslations(candidates);
         queue_compute(key, std::move(candidates));
@@ -2237,9 +2221,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             auto& program_va{programs[0]};
             auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env, host_info);
-            // Each half fit its texture arrays to the stage limits on its own; joined, they are
-            // one stage.
-            Shader::Optimization::LimitSampledTextureArrays(programs[index], host_info);
         }
 
         if (const auto edits = Shader::Optimization::ApplyOotVisualWorkaround(
@@ -2316,6 +2297,22 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                             key.state.patch_control_points_minus_one.Value() + 1, max_patch_size);
                 return nullptr;
             }
+        }
+    }
+    // Each stage stays within the limit on its own; together they share one descriptor set.
+    if (const u32 set_limit = host_info.max_descriptor_set_storage_buffers; set_limit != 0) {
+        size_t storage_buffers{};
+        for (size_t index = uses_vertex_a && uses_vertex_b ? 1 : 0;
+             index < Maxwell::MaxShaderProgram; ++index) {
+            if (key.unique_hashes[index] != 0) {
+                storage_buffers +=
+                    Shader::NumDescriptors(programs[index].info.storage_buffers_descriptors);
+            }
+        }
+        if (storage_buffers > set_limit) {
+            throw Shader::NotImplementedException(
+                "Binding {} storage buffers to a pipeline whose descriptor set binds {}",
+                storage_buffers, set_limit);
         }
     }
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};

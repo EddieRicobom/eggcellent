@@ -154,13 +154,6 @@ private:
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
         std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr);
 
-    /// Builds a disk-cached graphics pipeline from the first of its records (newest first) that
-    /// loads. When none does, the GPU thread's build of it is stored again.
-    std::unique_ptr<GraphicsPipeline> CreateCachedGraphicsPipeline(
-        const GraphicsPipelineCacheKey& key,
-        std::vector<std::vector<VideoCommon::FileEnvironment>>& records,
-        PipelineStatistics* statistics);
-
     [[nodiscard]] bool StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const;
 
     /// Translates the current compute program, binding the pointers in keep_pointers whatever
