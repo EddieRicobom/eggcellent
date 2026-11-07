@@ -342,6 +342,9 @@ u32 Maxwell3D::ProcessShadowRam(u32 method, u32 argument) {
 }
 
 void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
+    if (front_macros && !VideoCommon::GpuSplit::OnBackThread()) {
+        ReleaseFront();
+    }
     const auto control = shadow_state.shadow_ram_control;
     // Sunk methods are state writes only (not in execution_mask): skip unchanged values, as
     // CallMethod does.
@@ -512,6 +515,9 @@ void Maxwell3D::TraceFirstMethodWrite(u32 method, u32 argument) {
 }
 
 void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
+    if (front_macros && !VideoCommon::GpuSplit::OnBackThread()) {
+        ReleaseFront();
+    }
     if (!fast_maxwell3d || executing_macro != 0 || method >= MacroRegistersStart ||
         method == MAXWELL3D_REG_INDEX(shadow_ram_control)) {
         return CallMethodSlow(system, method, method_argument, is_last_call);
@@ -745,6 +751,9 @@ void Maxwell3D::DumpRecentWrites(u32 method) {
 }
 
 void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount, u32 methods_pending) {
+    if (front_macros && !VideoCommon::GpuSplit::OnBackThread()) {
+        ReleaseFront();
+    }
     RecordWrite(method, amount ? base_start[0] : 0, amount, methods_pending);
     // Methods after 0xE00 are special, they're actually triggers for some microcode that was
     // uploaded to the GPU during initialization.
@@ -1235,72 +1244,17 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
     return *front;
 }
 
-namespace {
-
-// Indexed draws that bind an index buffer other than the registers' (inline indices, small index
-// draws): the back sets and consumes Dirty::IndexBuffer for them itself.
-bool IsOtherIndexDraw(u32 method) {
-    switch (method) {
-    case MAXWELL3D_REG_INDEX(index_buffer32_first):
-    case MAXWELL3D_REG_INDEX(index_buffer16_first):
-    case MAXWELL3D_REG_INDEX(index_buffer8_first):
-    case MAXWELL3D_REG_INDEX(index_buffer32_subsequent):
-    case MAXWELL3D_REG_INDEX(index_buffer16_subsequent):
-    case MAXWELL3D_REG_INDEX(index_buffer8_subsequent):
-    case MAXWELL3D_REG_INDEX(draw_inline_index):
-    case MAXWELL3D_REG_INDEX(inline_index_2x16.even):
-    case MAXWELL3D_REG_INDEX(inline_index_4x8.index0):
-        return true;
-    default:
-        return false;
-    }
-}
-
-} // Anonymous namespace
-
-void Maxwell3D::FrontTrackIndexDraws(FrontState& fs, u32 method) {
-    if (method == MAXWELL3D_REG_INDEX(index_buffer.count)) {
-        fs.other_index_draw = false;
-    } else if (IsOtherIndexDraw(method)) {
-        fs.other_index_draw = true;
-    }
-}
-
-bool Maxwell3D::FrontSkipsIndexFirst(FrontState& fs, u32 method, u32 value, bool shadow_kept) {
-    // EDEN_NX2_EXP2: index_buffer.first written with its value. On the back it only stores the
-    // register and sets Dirty::IndexBuffer (an instance loop method: no deferred draw flush, and
-    // the draw manager reads the register when it draws). The flag matters only when the index
-    // buffer binding is stale for the next register-indexed draw; that draw needs an
-    // index_buffer.count write (draw_indexed), which always sets the flag, unless the count was
-    // written before an inline or small index draw that rebound and consumed the flag (then the
-    // write is sent).
-    if (method != MAXWELL3D_REG_INDEX(index_buffer.first) || !fs.skip_same || !shadow_kept ||
-        fs.regs[method] != value || fs.other_index_draw) {
-        return false;
-    }
-    ++fs.exp_skipped;
-    return true;
-}
-
-void Maxwell3D::FrontReportSameWrites(FrontState& fs) {
-    if ((++fs.exp_ticks & 0xffff) != 0) {
-        return;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (fs.exp_report == std::chrono::steady_clock::time_point{}) {
-        fs.exp_report = now;
-        return;
-    }
-    const double seconds = std::chrono::duration<double>(now - fs.exp_report).count();
-    if (seconds < 5.0) {
-        return;
-    }
-    LOG_INFO(HW_GPU,
-             "EDEN_NX2_EXP2: 3D writes per second: {:.0f} sent, {:.0f} same-value index_buffer.first "
-             "not sent, {:.0f} other same-value writes not sent",
-             fs.exp_sent / seconds, fs.exp_skipped / seconds, fs.exp_same / seconds);
-    fs.exp_skipped = fs.exp_same = fs.exp_sent = 0;
-    fs.exp_report = now;
+// With the split on, engine methods run on its back only: one here on another thread means the
+// split stopped (accuracy settings changed mid-game). Hand the macros back: the front's copy
+// goes stale from now on, and a restart copies the registers again (Front).
+void Maxwell3D::ReleaseFront() {
+    executing_macro = front->executing_macro;
+    macro_params = std::move(front->parameters);
+    std::memcpy(shadow_state.reg_array.data(), front->shadow.data(), sizeof(front->shadow));
+    shadow_state.shadow_ram_control = front->control;
+    front.reset();
+    front_macros = false;
+    LOG_INFO(HW_GPU, "GPU thread split stopped: 3D macros back on the engine");
 }
 
 void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
