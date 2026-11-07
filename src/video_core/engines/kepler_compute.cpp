@@ -406,20 +406,6 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             [&](u64 address, u32 payload, u32 flags) {
                 const bool four_words = (flags >> 30) == 0;
                 if (!memory_manager.IsFullyMappedRange(address, four_words ? 16 : sizeof(payload))) return false;
-                if (VideoCommon::QmdPrediction::Enabled() &&
-                    VideoCommon::GpuSplit::OnBackThread()) {
-                    if (const auto device = memory_manager.GpuToCpuAddress(address)) {
-                        VideoCommon::QmdPrediction::Verify(
-                            VideoCommon::QmdPrediction::Writer::Qmd, *device, payload, running_qmd,
-                            split.BackEntryPosition(), (flags & (1U << 26)) != 0);
-                    }
-                }
-                if (VideoCommon::GpuSplit::RecordingDispatch()) {
-                    // A payload release writes up to a report's 16 bytes, at a later fence.
-                    if (const auto device = memory_manager.GpuToCpuAddress(address)) {
-                        split.RecordDispatchWrite(*device, 16);
-                    }
-                }
                 if (flags & (1U << 26)) {
                     rasterizer->SignalFence([this, address, payload, flags] {
                         const u32 value = ReduceSemaphore((flags >> 20) & 7, (flags >> 24) & 1,
