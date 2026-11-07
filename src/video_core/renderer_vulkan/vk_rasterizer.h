@@ -252,6 +252,8 @@ private:
 
     void UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs);
 
+    /// Clears a 3D color target whose slices the framebuffer can't reach. Returns true when handled.
+    bool ClearVolumeSlice(const Framebuffer* framebuffer, u32 slice);
     void FrameDumpPass(const Framebuffer* framebuffer);
 #ifdef EGLANTINE_STREAMLINE
     bool OcarinaDlssEnabled() const;
