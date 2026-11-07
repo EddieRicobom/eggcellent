@@ -164,7 +164,6 @@ bool IsRuntimeRoutable(const IR::Inst& inst) {
     case IR::Opcode::WriteGlobal128:
     case IR::Opcode::GlobalAtomicIAdd32:
     case IR::Opcode::GlobalAtomicUMax32:
-    case IR::Opcode::GlobalAtomicCompareExchange32:
         return true;
     default:
         return false;
