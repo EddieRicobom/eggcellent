@@ -66,11 +66,7 @@ struct GPU::Impl {
         , is_async{is_async_}
     {}
 
-    ~Impl() {
-        // The renderer's teardown still flushes work that touches the bound channel's state,
-        // and `channels` is declared after `renderer`, so it would be freed first.
-        renderer.reset();
-    }
+    ~Impl() = default;
 
     std::shared_ptr<Control::ChannelState> CreateChannel(s32 channel_id) {
         auto channel_state = std::make_shared<Tegra::Control::ChannelState>(channel_id);
@@ -121,10 +117,13 @@ struct GPU::Impl {
 
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache() {
-        std::function<void(PAddr, size_t)> callback_writes([this](PAddr address, size_t size) {
-            renderer->ReadRasterizer()->OnCachedWrite(address, size);
-        });
+        std::vector<std::pair<DAddr, u64>> writes;
+        std::function<void(PAddr, size_t)> callback_writes(
+            [&writes](PAddr address, size_t size) { writes.emplace_back(address, size); });
         system.GatherGPUDirtyMemory(callback_writes);
+        if (!writes.empty()) {
+            renderer->ReadRasterizer()->OnCacheInvalidations(writes);
+        }
     }
 
     void ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callback) {
@@ -185,10 +184,6 @@ struct GPU::Impl {
 
     void RendererFrameEndNotify() {
         system.GetPerfStats().EndGameFrame();
-    }
-
-    void RendererFramesPresented(u32 count) {
-        system.GetPerfStats().AddPresentedFrames(count);
     }
 
     /// Performs any additional setup necessary in order to begin GPU emulation.
@@ -578,10 +573,6 @@ bool GPU::UseNvdec() const {
 
 void GPU::RendererFrameEndNotify() {
     impl->RendererFrameEndNotify();
-}
-
-void GPU::RendererFramesPresented(u32 count) {
-    impl->RendererFramesPresented(count);
 }
 
 void GPU::Start() {

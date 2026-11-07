@@ -154,35 +154,7 @@ bool DmaPusher::Step() {
             if (kepler_payload || macro_payload) {
                 const size_t words = std::min<size_t>(dma_state.method_count, header.size);
                 auto* const engine_state = subchannels[dma_state.subchannel];
-                // Parameters continued in an entry of their own can be arguments the GPU wrote
-                // (Donkey Kong Bananza's terrain: the culling pass counts each mesh's triangles
-                // into a 5-word indirect draw record and the colour pass draws with it). Read
-                // without a flush, the macro sees the older guest words (a zero count, so the
-                // terrain is never drawn). EDEN_NX2_PBFLUSH=0 turns this off.
-                static const bool flush_parameters = [] {
-                    const char* value = std::getenv("EDEN_NX2_PBFLUSH");
-                    return value == nullptr || value[0] != '0';
-                }();
-                bool flushed_parameters = false;
-                if (flush_parameters && words <= 64) {
-                    if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-                        split.Drain();
-                    }
-                    const GPUVAddr address = dma_state.dma_get;
-                    const size_t bytes = words * sizeof(u32);
-                    if (memory_manager.IsMemoryDirty(address, bytes, VideoCommon::CacheType::BufferCache)) {
-                        memory_manager.FlushRegion(address, bytes, VideoCommon::CacheType::BufferCache);
-                        flushed_parameters = true;
-                        static std::atomic<u32> flush_logs{};
-                        if (flush_logs.fetch_add(1) < 20) {
-                            LOG_INFO(HW_GPU, "Macro parameters at {:#x} ({} words) were written by the GPU: flushed",
-                                     address, words);
-                        }
-                    }
-                }
-                if (flushed_parameters) {
-                    engine_state->current_dirty = false;
-                } else if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
+                if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
                     // The caches behind IsMemoryDirty belong to the split's back thread.
                     split.Defer([engine_state, memory = &memory_manager, address = GPUVAddr{dma_state.dma_get},
                                  bytes = words * sizeof(u32)] {
@@ -469,17 +441,11 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
             auto const command_header = commands[index]; //can copy
             dma_state.dma_word_offset = u64((word_offset + index) * sizeof(u32));
             dma_state.is_last_call = dma_state.method_count <= 1;
-            const u32 called_method = dma_state.method;
             CallMethod(command_header.argument);
-            dma_state.method += static_cast<u32>(!dma_state.non_incrementing);
+            dma_state.method += !dma_state.non_incrementing ? 1 : 0;
             dma_state.non_incrementing |= dma_increment_once;
             dma_state.method_count--;
             index++;
-            // Only the puller methods (below non_puller_methods) can leave an acquire pending.
-            if (called_method < non_puller_methods && puller.HasPendingAcquire()) {
-                return index;
-            }
-            continue;
         } else {
             auto const command_header = commands[index]; //can copy
             // No command active - this is the first word of a new one
@@ -512,7 +478,7 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
             }
             index++;
         }
-        if (dma_state.method < non_puller_methods && puller.HasPendingAcquire()) {
+        if (puller.HasPendingAcquire()) {
             return index;
         }
     }
