@@ -4,9 +4,6 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <algorithm>
-#include <thread>
-
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
@@ -27,12 +24,6 @@ namespace {
 
 constexpr size_t MAX_FRAMES_IN_FLIGHT = 7;
 constexpr u32 MAX_PRESENT_ATTEMPTS = 3;
-// Upper bound on how long the present thread holds a frame for pacing.
-constexpr auto MAX_PRESENT_DELAY = std::chrono::milliseconds(100);
-constexpr auto PRESENT_SPIN_TAIL = std::chrono::milliseconds(1);
-// A queued frame due longer ago than this means the present thread is behind, usually blocked on
-// vblank.
-constexpr auto PRESENT_LATE_TOLERANCE = std::chrono::milliseconds(2);
 #ifdef HAS_LSFG
 static_assert(MAX_FRAMES_IN_FLIGHT <= LSFG_MAX_TARGETS);
 #endif
@@ -150,11 +141,9 @@ PresentManager::PresentManager(const vk::Instance& instance_,
             VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = device.GetGraphicsFamily(),
     });
-    // Every possible frame is set up now so frame generation can be enabled while a game runs,
-    // but only image_count of them are used (and get images) until more are needed.
-    auto cmdbuffers = cmdpool.Allocate(MAX_FRAMES_IN_FLIGHT);
+    auto cmdbuffers = cmdpool.Allocate(image_count);
 
-    frames.resize(MAX_FRAMES_IN_FLIGHT);
+    frames.resize(image_count);
     for (u32 i = 0; i < frames.size(); i++) {
         Frame& frame = frames[i];
         frame.index = i;
@@ -170,9 +159,7 @@ PresentManager::PresentManager(const vk::Instance& instance_,
             .flags = VK_FENCE_CREATE_SIGNALED_BIT,
         });
         frame.storage_capable = storage_supported;
-    }
-    for (; circulating_frames < image_count; ++circulating_frames) {
-        free_queue.push_back(&frames[activated_frames++]);
+        free_queue.push_back(&frame);
     }
 
     if (use_present_thread) {
@@ -186,42 +173,16 @@ Frame* PresentManager::GetRenderFrame() {
 
     // Wait for free presentation frames
     std::unique_lock lock{free_mutex};
+    free_cv.wait(lock, [this] { return !free_queue.empty(); });
 
-    // Frame generation settings can change while a game runs, so the number of frames in use
-    // follows image_count. Parked frames are reused before new ones are activated.
-    UpdateImageCount();
-    const std::size_t wanted_frames = image_count;
-    for (; circulating_frames < wanted_frames; ++circulating_frames) {
-        if (parked_frames.empty()) {
-            free_queue.push_back(&frames[activated_frames++]);
-        } else {
-            free_queue.push_back(parked_frames.back());
-            parked_frames.pop_back();
-        }
-    }
-
-    Frame* frame;
-    for (;;) {
-        free_cv.wait(lock, [this] { return !free_queue.empty(); });
-
-        // Take the frame from the queue
-        frame = free_queue.front();
-        free_queue.pop_front();
-        if (circulating_frames <= wanted_frames) {
-            break;
-        }
-        // Fewer frames are needed now. Only frames popped here are parked, so a parked frame
-        // is never in a queue or held by the present thread.
-        parked_frames.push_back(frame);
-        --circulating_frames;
-    }
+    // Take the frame from the queue
+    Frame* frame = free_queue.front();
+    free_queue.pop_front();
 
     // Wait for the presentation to be finished so all frame resources are free
     frame->present_done.Wait();
     frame->present_done.Reset();
 
-    frame->present_after = {};
-    frame->generated = false;
     return frame;
 }
 
@@ -233,8 +194,6 @@ void PresentManager::Present(Frame* frame) {
             frame_cv.notify_one();
         });
     } else {
-        // present_after is ignored here: sleeping on this thread would stall emulation, so
-        // generated frames rely on the present mode (FIFO) for spacing.
         scheduler.WaitWorker();
         CopyToSwapchain(frame);
         free_queue.push_back(frame);
@@ -243,57 +202,6 @@ void PresentManager::Present(Frame* frame) {
 
 size_t PresentManager::MaxExtraFrames() const {
     return image_count - 1;
-}
-
-void PresentManager::StartPresentThread() {
-    if (use_present_thread) {
-        return;
-    }
-    // Every frame so far was presented on the render thread, so none is queued.
-    use_present_thread = true;
-    present_thread_for_frame_gen = true;
-    present_thread = std::jthread([this](std::stop_token token) { PresentThread(token); });
-}
-
-void PresentManager::StopFrameGenPresentThread() {
-    if (!present_thread_for_frame_gen) {
-        return;
-    }
-    // Everything queued is presented first, so the render thread can present again.
-    scheduler.WaitWorker();
-    WaitPresent();
-    StopPresentThread();
-    present_thread_for_frame_gen = false;
-    use_present_thread = false;
-}
-
-void PresentManager::StopPresentThread() {
-    present_thread.request_stop();
-    if (present_thread.joinable()) {
-        present_thread.join();
-    }
-}
-
-size_t PresentManager::GeneratedFramesAllowed(size_t wanted) {
-    if (!use_present_thread) {
-        // Presenting on the render thread, FIFO spaces generated frames.
-        return wanted;
-    }
-    {
-        // Behind if the frame being presented, or the next one queued, is overdue. The present
-        // thread sets presenting_after under queue_mutex as it pops, so neither is missed.
-        const auto late = std::chrono::steady_clock::now() - PRESENT_LATE_TOLERANCE;
-        std::scoped_lock lock{queue_mutex};
-        if (presenting_after.load(std::memory_order_relaxed) < late.time_since_epoch().count() ||
-            (!present_queue.empty() && present_queue.front()->present_after < late)) {
-            return 0;
-        }
-    }
-    std::scoped_lock lock{free_mutex};
-    // GetRenderFrame parks the frames over image_count instead of handing them out.
-    const size_t surplus = circulating_frames > image_count ? circulating_frames - image_count : 0;
-    const size_t usable = free_queue.size() > surplus ? free_queue.size() - surplus : 0;
-    return usable > 1 ? (std::min)(wanted, usable - 1) : 0;
 }
 
 bool PresentManager::NeedsStorage(const Frame* frame, bool required) const {
@@ -431,31 +339,13 @@ void PresentManager::PresentThread(std::stop_token token) {
             // Take the frame and notify anyone waiting
             Frame* frame = present_queue.front();
             present_queue.pop_front();
-            // A generated frame is dropped once the frame paced after it is due, so presenting
-            // it (a whole vblank under FIFO) never holds back a real frame. Unpaced frames
-            // (EDEN_FRAME_GEN_NO_PACING) share one time and still go out back to back.
-            const Frame* next = present_queue.empty() ? nullptr : present_queue.front();
-            const bool stale = frame->generated && next &&
-                               next->present_after > frame->present_after &&
-                               next->present_after <= std::chrono::steady_clock::now();
-            presenting_after.store(frame->present_after.time_since_epoch().count(),
-                                   std::memory_order_relaxed);
             frame_cv.notify_one();
 
             // By exchanging the lock ownership we take the swapchain lock
             // before the queue lock goes out of scope. This way the swapchain
             // lock in WaitPresent is guaranteed to occur after here.
             void(std::exchange(lock, std::unique_lock{swapchain_mutex}));
-            if (stale) {
-                DiscardFrame(frame);
-            } else {
-                // Waiting under the swapchain lock keeps WaitPresent from returning early.
-                WaitPresentTime(frame);
-                CopyToSwapchain(frame);
-            }
-            presenting_after.store(
-                std::chrono::steady_clock::time_point::max().time_since_epoch().count(),
-                std::memory_order_relaxed);
+            CopyToSwapchain(frame);
 
             // Free the frame for reuse
             std::scoped_lock fl{free_mutex};
@@ -471,42 +361,20 @@ void PresentManager::RecreateSwapchain(Frame* frame) {
 }
 
 void PresentManager::SetImageCount() {
-    swapchain_image_count = swapchain.GetImageCount();
-    swapchain_image_format = swapchain.GetImageFormat();
-    UpdateImageCount();
-}
-
-void PresentManager::UpdateImageCount() {
     // We cannot have more than 7 images in flight at any given time.
     // FRAMES_IN_FLIGHT is 8, and the cache TICKS_TO_DESTROY is 8.
     // Mali drivers will give us 6.
-    const size_t minimum = std::min<size_t>(swapchain_image_count, MAX_FRAMES_IN_FLIGHT);
 #ifdef HAS_LSFG
     const size_t generations = Settings::FrameGenMaxGenerations();
     const size_t queued_composites = Settings::values.frame_gen_queue_target.GetValue() + 1;
-    // One more keeps a frame free for the next real frame while generated ones are queued.
-    const size_t reserve = generations > 0 ? 1 : 0;
-    image_count = std::clamp<size_t>((generations + 1) * queued_composites + reserve, minimum,
-                                     MAX_FRAMES_IN_FLIGHT);
+    image_count =
+        std::clamp<size_t>((generations + 1) * queued_composites, swapchain.GetImageCount(),
+                           MAX_FRAMES_IN_FLIGHT);
 #else
-    image_count = minimum;
+    image_count = std::min<size_t>(swapchain.GetImageCount(), MAX_FRAMES_IN_FLIGHT);
 #endif
-}
-
-void PresentManager::WaitPresentTime(const Frame* frame) const {
-    using Clock = std::chrono::steady_clock;
-    const Clock::time_point now = Clock::now();
-    if (frame->present_after <= now) {
-        return;
-    }
-    const Clock::time_point latest = now + MAX_PRESENT_DELAY;
-    const Clock::time_point target = (std::min)(frame->present_after, latest);
-    if (target - now > PRESENT_SPIN_TAIL) {
-        std::this_thread::sleep_until(target - PRESENT_SPIN_TAIL);
-    }
-    while (Clock::now() < target) {
-        std::this_thread::yield();
-    }
+    swapchain_image_count = swapchain.GetImageCount();
+    swapchain_image_format = swapchain.GetImageFormat();
 }
 
 void PresentManager::DiscardFrame(Frame* frame) {
@@ -566,7 +434,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         RecreateSwapchain(frame);
     }
 
-    while (swapchain.AcquireNextImage(!use_present_thread, !frame->generated)) {
+    while (swapchain.AcquireNextImage(!use_present_thread)) {
         RecreateSwapchain(frame);
     }
 
@@ -602,7 +470,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         VkImageMemoryBarrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
             .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
             .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -715,7 +583,6 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
 
     // Present
     swapchain.Present(render_semaphore);
-    presented_frames.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace Vulkan
