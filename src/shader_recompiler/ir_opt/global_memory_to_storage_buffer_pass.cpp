@@ -155,7 +155,7 @@ bool IsGlobalMemory(const IR::Inst& inst) {
 }
 
 /// Returns true when the backend can pick a global access's buffer among the bound ones at run time
-bool IsRuntimeRoutable(const IR::Inst& inst) {
+[[maybe_unused]] bool IsRuntimeRoutable(const IR::Inst& inst) {
     switch (inst.GetOpcode()) {
     case IR::Opcode::LoadGlobal32:
     case IR::Opcode::LoadGlobal64:
