@@ -1307,11 +1307,10 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 });
             } else {
                 count = std::min(count, sampled_dynamic_cap);
-                // Depth-compare sampling returns a float in Vulkan, so its image must be float
-                // even when a garbage or unknown descriptor reads as an integer format.
-                static const bool depth_float_fix{Common::EnvGate("EGLANTINE_DEPTH_FLOAT_FIX")};
-                const bool is_integer{(!depth_float_fix || flags.is_depth == 0) &&
-                                      is_texture_pixel_format_integer(cbuf)};
+                // A depth-compare image is float in SPIR-V (OpImageSampleDref* returns a float
+                // and needs a float sampled type). An integer format bound to one is a stale or
+                // out-of-range TIC entry, and the integer type made RADV's spirv_to_nir fail.
+                const bool is_integer{!flags.is_depth && is_texture_pixel_format_integer(cbuf)};
                 index = descriptors.Add(TextureDescriptor{
                     .type = flags.type,
                     .is_depth = flags.is_depth != 0,
