@@ -1357,10 +1357,8 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
         const auto& candidates{it->second};
         const bool has_loaded_pointer{std::ranges::any_of(
             candidates, [](const StorageBufferAddr& c) { return c.indirect != ~0U; })};
-        if (paired_found &&
-            (!has_loaded_pointer || !info.bind_competing_loaded || !IsRuntimeRoutable(inst))) {
-            // No pointer loaded from memory competes with the paired one, or the access cannot
-            // stay global: keep the pair.
+        if (paired_found && !has_loaded_pointer) {
+            // No pointer loaded from memory competes with the paired one: keep the pair.
         } else if (candidates.size() > 1 || paired_found ||
                    (!candidates.empty() && info.native_dynamic.contains(start))) {
             // Bind every candidate and keep the access global; the backend picks the buffer at
@@ -1368,7 +1366,6 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
             bool accepted{};
             if (paired_found) {
                 // The paired pointer is the other input of the select or phi; bind it too.
-                info.competing_loaded_bound = true;
                 info.set.insert(*storage_buffer);
                 if (IsGlobalMemoryWrite(inst)) {
                     info.writes.insert(*storage_buffer);
@@ -1606,16 +1603,6 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         }
     };
     collect();
-    if (info.competing_loaded_bound && info.set.size() > Info::MAX_SSBOS) {
-        // Not enough bindings for the loaded pointers that compete with paired ones: keep the
-        // pairs, as if no loaded pointer competed.
-        StorageInfo paired;
-        paired.iterator_words = std::move(info.iterator_words);
-        paired.atomic_pointers = std::move(info.atomic_pointers);
-        paired.bind_competing_loaded = false;
-        info = std::move(paired);
-        collect();
-    }
     // Compute programs may bind up to Info::MAX_SSBOS (64) storage buffers, so pointer table
     // entries still fit when the program's own pointers take most of 32. Ocarina of Time's foliage
     // list builder has 29 of its own: the table entries of its last two sections (Hyrule Field

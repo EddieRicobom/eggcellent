@@ -23,6 +23,7 @@
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/debugger/debugger.h"
+#include "core/debugger/nx2_debug_tools.h"
 #include "core/device_memory.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/fs_filesystem.h"
@@ -69,6 +70,7 @@
 #include "hid_core/hid_core.h"
 #include "network/network.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/nx2_diag.h"
 #include "video_core/renderer_base.h"
 #include "video_core/video_core.h"
 
@@ -485,10 +487,15 @@ struct System::Impl {
             game_info.version = title_version;
             room_member->SendGameInfo(game_info);
         }
+        if (VideoCommon::Nx2Diag::Active()) {
+            VideoCommon::Nx2Diag::Diagnostics::Get().SetTitle(params.program_id);
+        }
+        debug_service = Nx2Debug::MaybeStartService(system, name, params.program_id);
         return SystemResultStatus::Success;
     }
 
     void ShutdownMainProcess() {
+        debug_service.reset();
         SetShuttingDown(true);
         Common::ADPF::Shutdown();
 
@@ -625,11 +632,11 @@ struct System::Impl {
     std::atomic_bool is_powered_on{};
     bool is_multicore : 1 = false;
     bool extended_memory_layout : 1 = false;
-    // Separate atomics: these are set from service, NVDEC and frontend threads, and bit-fields
-    // sharing a byte lost concurrent updates.
-    std::atomic_bool exit_locked{};
-    std::atomic_bool exit_requested{};
-    std::atomic_bool nvdec_active{};
+    bool exit_locked : 1 = false;
+    bool exit_requested : 1 = false;
+    bool nvdec_active : 1 = false;
+    /// EDEN_NX2_DEBUG_SERVER; the last member, so it stops before anything it reads goes away.
+    std::unique_ptr<Nx2Debug::Service> debug_service;
 
     void EnsureGeneralChannelInitialized(System& system) {
         if (!general_channel_event) {
