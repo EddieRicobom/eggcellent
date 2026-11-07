@@ -1033,11 +1033,8 @@ private:
     // EDEN_NX2_SPARSE_LAZY=0 backs sparse regions whole, as before.
     static bool LazySparseRegions() {
         static const bool lazy = [] {
-            if (const char* value = std::getenv("EDEN_NX2_SPARSE_LAZY")) {
-                return value[0] != '0';
-            }
-            // Off on hosts whose driver can't use the sparse images (AMD's Windows driver).
-            return Tegra::g_nx2_sparse_lazy_supported.load();
+            const char* value = std::getenv("EDEN_NX2_SPARSE_LAZY");
+            return value == nullptr || value[0] != '0';
         }();
         return lazy;
     }
@@ -1509,9 +1506,6 @@ inline Nx2ImageLayout Nx2CalculateImageLayout(const u32* preference) {
     }
     const u64 block_rows = u64{1} << layout.block_height_log2;
     layout.size = layout.pitch * Common::AlignUp(u64{layout.height}, block_rows);
-    // ponytail: words 6/7 are unconfirmed and must not scale the size: multiplying by them made
-    // Mario Kart World abort at boot (0x3200F3 right after its first draws, bisect a0fae9746a).
-    // Scaling again needs a title that under-allocates without it.
     layout.alignment = std::max<u64>(64 * block_rows, 0x1000);
     return layout;
 }
@@ -1644,9 +1638,7 @@ public:
             {1, &INx2Vi2Session::ReturnOne, "Unknown1"},
             {3, &INx2Vi2Session::ReturnOne, "GetDisplayCount (guessed)"},
             {5, &INx2Vi2Session::GetTimestampRecorderCount, "GetTimestampRecorderCount (guessed)"},
-            {11, &INx2Vi2Session::GetNotificationEvent, "GetNotificationEvent"},
-            {13, &INx2Vi2Session::SucceedQuietly, "ReleaseNotificationEvent"},
-            {21, &INx2Vi2Session::GetNotifications, "GetNotifications"},
+            {11, &INx2Vi2Session::ReturnEvent, "Unknown11"},
             {31, &INx2Vi2Session::AcquireNativeEvent, "AcquireNativeEvent"},
             {32, &INx2Vi2Session::DuplicateNativeEvent, "DuplicateNativeEvent"},
             {261, &INx2Vi2Session::BindVsync, "BindDisplayVsyncEvent"},
@@ -1661,32 +1653,44 @@ public:
             {270, &INx2Vi2Session::UnbindNativeEvent, "UnbindDisplayBufferMaxResolutionEvent"},
             {271, &INx2Vi2Session::BindChange, "BindDisplayModeCapabilityEvent"},
             {272, &INx2Vi2Session::UnbindNativeEvent, "UnbindDisplayModeCapabilityEvent"},
-            // Title 1 calls the 103..105 queries ~75 times a second with the display name
-            // "default"; quiet handlers (the auto stub logged two lines per call).
+            // Title 1 calls these ~75 times a second with the display name "default"; quiet
+            // handlers (the auto stub logged two lines per call: a 50 MB log in an 18 minute
+            // session).
             {103, &INx2Vi2Session::QueryDisplayRefreshRate, "QueryDisplayRefreshRate"},
             {104, &INx2Vi2Session::QueryDisplayHdrStatus, "QueryDisplayHdrStatus"},
             {105, &INx2Vi2Session::QueryDisplayHdrPaperWhite, "QueryDisplayHdrPaperWhite"},
-            {106, &INx2Vi2Session::GetBufferMaxResolution, "GetBufferMaxResolution"},
             {212, &INx2Vi2Session::GetLayerBufferBits, "GetLayerBufferBits"},
-            // Display/client setup (title 2): nothing to track while presents composite directly.
-            {51, &INx2Vi2Session::SucceedQuietly, "ConfigureRequestGroups"},
-            {101, &INx2Vi2Session::OpenDisplay, "OpenDisplay"},
-            {102, &INx2Vi2Session::CloseDisplay, "CloseDisplay"},
-            {111, &INx2Vi2Session::SucceedQuietly, "OpenEndpoint"},
-            {112, &INx2Vi2Session::SucceedQuietly, "CloseEndpoint"},
-            {201, &INx2Vi2Session::RegisterClientState, "RegisterClientState"},
-            {202, &INx2Vi2Session::UnregisterClientState, "UnregisterClientState"},
-            {251, &INx2Vi2Session::SucceedQuietly, "BindClientDisplay"},
-            {252, &INx2Vi2Session::SucceedQuietly, "UnbindClientDisplay"},
+            {106, &INx2Vi2Session::GetBufferMaxResolution, "GetBufferMaxResolution"},
             {228, &INx2Vi2Session::CancelClientBuffer, "CancelClientBuffer"},
             {229, &INx2Vi2Session::PresentClientBuffer, "PresentClientBuffer"},
             // Firmware commands without a known meaning: zeroed replies.
+            {13, &INx2Vi2Session::StubReplyZeroed, "Unknown13"},
+            {51, &INx2Vi2Session::StubReplyZeroed, "Unknown51"},
+            {101, &INx2Vi2Session::StubReplyZeroed, "Unknown101"},
+            {102, &INx2Vi2Session::StubReplyZeroed, "Unknown102"},
             {107, &INx2Vi2Session::StubReplyZeroed, "Unknown107"},
             {108, &INx2Vi2Session::StubReplyZeroed, "Unknown108"},
+            {111, &INx2Vi2Session::StubReplyZeroed, "Unknown111"},
+            {112, &INx2Vi2Session::StubReplyZeroed, "Unknown112"},
             {113, &INx2Vi2Session::StubReplyZeroed, "Unknown113"},
+            {202, &INx2Vi2Session::StubReplyZeroed, "Unknown202"},
             {230, &INx2Vi2Session::StubReplyZeroed, "Unknown230"},
             {231, &INx2Vi2Session::StubReplyZeroed, "Unknown231"},
             {232, &INx2Vi2Session::StubReplyZeroed, "Unknown232"},
+            {251, &INx2Vi2Session::StubReplyZeroed, "Unknown251"},
+            {252, &INx2Vi2Session::StubReplyZeroed, "Unknown252"},
+            {261, &INx2Vi2Session::StubReplyZeroed, "Unknown261"},
+            {262, &INx2Vi2Session::StubReplyZeroed, "Unknown262"},
+            {263, &INx2Vi2Session::StubReplyZeroed, "Unknown263"},
+            {264, &INx2Vi2Session::StubReplyZeroed, "Unknown264"},
+            {265, &INx2Vi2Session::StubReplyZeroed, "Unknown265"},
+            {266, &INx2Vi2Session::StubReplyZeroed, "Unknown266"},
+            {267, &INx2Vi2Session::StubReplyZeroed, "Unknown267"},
+            {268, &INx2Vi2Session::StubReplyZeroed, "Unknown268"},
+            {269, &INx2Vi2Session::StubReplyZeroed, "Unknown269"},
+            {270, &INx2Vi2Session::StubReplyZeroed, "Unknown270"},
+            {271, &INx2Vi2Session::StubReplyZeroed, "Unknown271"},
+            {272, &INx2Vi2Session::StubReplyZeroed, "Unknown272"},
             {301, &INx2Vi2Session::StubReplyZeroed, "Unknown301"},
             {302, &INx2Vi2Session::StubReplyZeroed, "Unknown302"},
             {351, &INx2Vi2Session::StubReplyZeroed, "Unknown351"},
@@ -1756,8 +1760,7 @@ private:
             frames_ahead = 0;
         }
         const auto entered = std::chrono::steady_clock::now();
-        if (frames_ahead == 1 ||
-                   (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {
+        if (frames_ahead == 1 || (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {
             LOG_DEBUG(Service, "nx2:vi2 present #{} fence ({}, {:#x}), waiting for ({}, {:#x}); now {:#x}",
                       m_presents, ~w[22], w[24], m_previous_fence_id, m_previous_fence_value,
                       ~w[22] < 192 ? system.Host1x().GetSyncpointManager().GetGuestSyncpointValue(~w[22]) : 0U);
@@ -1778,8 +1781,6 @@ private:
         } else if (frames_ahead == 0) {
             WaitForFrame(~w[22], w[24]);
         }
-        m_older_fence_id = m_previous_fence_id;
-        m_older_fence_value = m_previous_fence_value;
         m_previous_fence_id = ~w[22];
         m_previous_fence_value = w[24];
         const auto waited = std::chrono::steady_clock::now();
@@ -1812,7 +1813,6 @@ private:
             }
             m_stats.last_present = entered;
             if (++m_stats.presents == 600) {
-                const double seconds = static_cast<double>(m_stats.frame_us) / 1e6;
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
                          "blocked on the GPU fence {} us (max {}), composite {} us, vblank "
@@ -1842,10 +1842,6 @@ private:
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};
-    u32 m_older_fence_id{~0U}; // the present before the previous one
-    u32 m_older_fence_value{};
-    u32 m_present_interval{1};
-    u32 m_smooth_cooldown{}; // presents left at one frame ahead after a long two-ahead wait
 
     // The console flips one frame per 60 Hz vblank and keeps the rest queued, so a game can't
     // present faster than that. Every slot is reported free here: hold each present until the
@@ -2225,13 +2221,6 @@ private:
         }
     }
 
-    // 212(u64 client token): u64 mask of the buffer slots the client may acquire. The auto stub's
-    // zero mask left the client no buffer and it tore its display down.
-    void GetClientAvailability(HLERequestContext& ctx) {
-        constexpr u64 AvailableSlots = 0x7fff;
-        TipcReplyWords(ctx, {static_cast<u32>(AvailableSlots), static_cast<u32>(AvailableSlots >> 32)});
-    }
-
     // 228(u64 token, u32 slot): return a buffer without presenting it.
     void CancelClientBuffer(HLERequestContext& ctx) {
         constexpr u64 AvailableSlots = 0x7fff;
@@ -2273,12 +2262,6 @@ private:
         TipcReplyWords(ctx, {static_cast<u32>(AvailableSlots), static_cast<u32>(AvailableSlots >> 32)});
     }
 
-    // The same reply as the auto stub (success, no data), without its log lines.
-    void SucceedQuietly(HLERequestContext& ctx) {
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
     void ReturnOne(HLERequestContext& ctx) {
         LOG_WARNING(Service, "(STUBBED) nx2:vi2 TIPC {}, returning 1", ctx.GetCommand());
         TipcReplyWords(ctx, {1});
@@ -2313,97 +2296,15 @@ private:
         TipcReplyWords(ctx, {7});
     }
 
-    // 11: the notification event the SDK's render thread waits on while it tears a client down.
-    // One event per session, signalled as bitmaps fill (201/202, 101/102); a fresh, never
-    // signalled event per call left that thread blocked forever after 202.
-    void GetNotificationEvent(HLERequestContext& ctx) {
-        if (!m_notification_event) {
-            m_notification_event = m_context.CreateEvent(fmt::format("nx2:vi2:Notify{}", m_events.size()));
-            m_events.push_back(m_notification_event);
-        }
-        if (AnyNotification()) {
-            m_notification_event->Signal(system.Kernel());
-        }
+    void ReturnEvent(HLERequestContext& ctx) {
+        LOG_WARNING(Service, "(STUBBED) nx2:vi2 TIPC {} [2]={:#x} [3]={:#x}, returning an event",
+                    ctx.GetCommand(), ctx.CommandBuffer()[2], ctx.CommandBuffer()[3]);
+        auto* event = m_context.CreateEvent(fmt::format("nx2:vi2:Event{}", m_events.size()));
+        m_events.push_back(event);
         IPC::ResponseBuilder rb{ctx, 2, 1, 0};
         rb.Push(ResultSuccess);
-        rb.PushCopyObjects(ctx, m_notification_event->GetReadableEvent());
+        rb.PushCopyObjects(ctx, event->GetReadableEvent());
     }
-
-    // 21(W: 32 u32 notification counts): hand them over and clear.
-    void GetNotifications(HLERequestContext& ctx) {
-        const auto size = std::min<std::size_t>(ctx.GetWriteBufferSize(), sizeof(m_notifications));
-        if (size != 0) {
-            ctx.WriteBuffer(m_notifications.data(), size);
-        }
-        if (size >= sizeof(m_notifications)) {
-            m_notifications.fill(0);
-            if (m_notification_event) {
-                m_notification_event->Clear(system.Kernel());
-            }
-        }
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
-    // 101(u64 display "default", u32 flags): remember which notification index this display owns.
-    void OpenDisplay(HLERequestContext& ctx) {
-        const auto* w = ctx.CommandBuffer();
-        m_display_notification = w[4];
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
-    // 102(u64 display): the display retired, wake whoever waits for that notification.
-    void CloseDisplay(HLERequestContext& ctx) {
-        Notify(m_display_notification);
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
-    // 201(u64 token, u32 retire notification, u32 available notification).
-    void RegisterClientState(HLERequestContext& ctx) {
-        const auto* w = ctx.CommandBuffer();
-        const u64 token = u64{w[2]} | (u64{w[3]} << 32);
-        if (token != 0 && w[4] < m_notifications.size() * 32 && w[5] < m_notifications.size() * 32 &&
-            w[4] != w[5]) {
-            m_clients[token] = w[4];
-        }
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
-    // 202(u64 token): the client retired; the SDK's render thread blocks on this notification.
-    void UnregisterClientState(HLERequestContext& ctx) {
-        const auto* w = ctx.CommandBuffer();
-        const u64 token = u64{w[2]} | (u64{w[3]} << 32);
-        const auto client = m_clients.find(token);
-        if (client != m_clients.end()) {
-            LOG_INFO(Service, "nx2:vi2 client {:#x} retired, notification {}", token, client->second);
-            Notify(client->second);
-            m_clients.erase(client);
-        }
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
-    bool AnyNotification() const {
-        return std::ranges::any_of(m_notifications, [](u32 bits) { return bits != 0; });
-    }
-
-    void Notify(u32 index) {
-        if (index >= m_notifications.size() * 32) {
-            return;
-        }
-        m_notifications[index / 32] |= 1U << (index % 32);
-        if (m_notification_event) {
-            m_notification_event->Signal(system.Kernel());
-        }
-    }
-
-    std::map<u64, u32> m_clients; // token -> retire notification index
-    std::array<u32, 32> m_notifications{};
-    u32 m_display_notification{};
-    Kernel::KEvent* m_notification_event{};
 
     // 31(u32 index < 8): the session's event for that slot (the sdk picks a free index). The
     // 261..272 commands bind a slot to a display event source and unbind it again. Until a slot
@@ -3293,7 +3194,6 @@ public:
             {111, &INx2GraphicsSystemSession::CreateNativeMemory, "CreateNativeMemory"},
             {112, &INx2GraphicsSystemSession::DestroyNativeMemory, "DestroyNativeMemory"},
             {114, &INx2GraphicsSystemSession::BindNativeMemory, "BindNativeMemory"},
-            {115, &INx2GraphicsSystemSession::ConfigureNativeMemory, "ConfigureNativeMemory"},
             {314, &INx2GraphicsSystemSession::ConfigureWindowImagePool, "DestroyNativeWindowAliasImagePool"},
             {315, &INx2GraphicsSystemSession::ConfigureWindowImagePool, "CreateNativeWindowAliasImagePool"},
             {423, &INx2GraphicsSystemSession::BindNativeGpuMemory, "BindNativeGpuMemory"},
@@ -3721,12 +3621,6 @@ private:
         }
         LOG_DEBUG(Service, "nx2:gsv 112 DestroyNativeMemory id {}", id);
         TipcReplyWords(ctx, {});
-    }
-
-    // 115(u32 mode, u32): replies a u64 optional memory mode; 0 keeps the nvdrv-compatible path
-    // (an empty reply leaves the request's mode word where the SDK reads it).
-    void ConfigureNativeMemory(HLERequestContext& ctx) {
-        TipcReplyWords(ctx, {0, 0});
     }
 
     // 114(u32 id, u64 address, u64 size, u64 flags, u64 offset): back native memory with process

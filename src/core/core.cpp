@@ -369,7 +369,6 @@ struct System::Impl {
 
         // Switch 2 titles size their heap from the total memory and need the 12 GiB layout. Set it
         // as a per-game value, so RestoreGlobalState brings back the configured layout afterwards.
-        Settings::SetCurrentProgramIsSwitch2(switch2_program);
         if (switch2_program &&
             Settings::values.memory_layout_mode.GetValue() != Settings::MemoryLayout::Memory_12Gb) {
             LOG_INFO(Core, "Switch 2 program: using the 12 GiB memory layout");
@@ -462,14 +461,10 @@ struct System::Impl {
             }
         }
 
-        {
-            // Frontend timers poll GetAndResetPerfStats from their own threads.
-            std::scoped_lock lk{perf_stats_mutex};
-            perf_stats.emplace(params.program_id);
-            // Reset counters and set time origin to current frame
-            perf_stats->GetAndResetStats(core_timing.GetGlobalTimeUs());
-            perf_stats->BeginSystemFrame();
-        }
+        perf_stats.emplace(params.program_id);
+        // Reset counters and set time origin to current frame
+        GetAndResetPerfStats();
+        perf_stats->BeginSystemFrame();
 
         const FileSys::PatchManager pm(params.program_id, system.GetFileSystemController(), system.GetContentProvider());
         auto const metadata = pm.GetControlMetadata();
@@ -523,10 +518,7 @@ struct System::Impl {
         audio_core.reset();
         gpu_core.reset();
         host1x_core.reset();
-        {
-            std::scoped_lock lk{perf_stats_mutex};
-            perf_stats.reset();
-        }
+        perf_stats.reset();
         cpu_manager.Shutdown();
         debugger.reset();
         kernel.Shutdown();
@@ -564,7 +556,6 @@ struct System::Impl {
     }
 
     PerfStatsResults GetAndResetPerfStats() {
-        std::scoped_lock lk{perf_stats_mutex};
         if (!perf_stats) {
             return {};
         }
@@ -599,7 +590,6 @@ struct System::Impl {
     std::optional<Service::KernelHelpers::ServiceContext> general_channel_context;
     std::optional<Service::Event> general_channel_event;
     std::optional<Core::PerfStats> perf_stats;
-    std::mutex perf_stats_mutex;
     std::optional<Tegra::Host1x::Host1x> host1x_core;
     std::optional<Core::DeviceMemory> device_memory;
     std::optional<AudioCore::AudioCore> audio_core;
