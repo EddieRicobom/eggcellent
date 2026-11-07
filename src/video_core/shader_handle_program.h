@@ -4,7 +4,6 @@
 #pragma once
 
 #include <algorithm>
-#include <utility>
 
 #include "common/common_types.h"
 #include "shader_recompiler/shader_info.h"
