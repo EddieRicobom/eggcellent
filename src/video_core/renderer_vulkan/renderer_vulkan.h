@@ -114,6 +114,8 @@ private:
     std::optional<TurboMode> turbo_mode;
 
     Frame applet_frame;
+    // DrawToFrame recreates the image when the layout size changes.
+    Frame screenshot_frame{};
 };
 
 } // namespace Vulkan
