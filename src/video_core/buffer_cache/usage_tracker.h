@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <algorithm>
 #include <array>
 #include <utility>
 #include <vector>
@@ -73,9 +72,6 @@ public:
         if (IsPageUsed(page, offset, size)) {
             return true;
         }
-        if (page == page_end) {
-            return false;
-        }
         for (size_t i = page + 1; i < page_end; i++) {
             if (pages[i] != 0) {
                 return true;
@@ -92,11 +88,6 @@ private:
             return;
         }
         const size_t offset_in_page = offset % BUFFER_PAGE_BYTES;
-        const size_t end_in_page = std::min<size_t>(
-            offset_in_page + std::min<u64>(size, BUFFER_PAGE_BYTES), BUFFER_PAGE_BYTES);
-        if (end_in_page <= offset_in_page) {
-            return 0;
-        }
         const size_t first_bit = offset_in_page >> BUFFER_BYTES_PER_BITSHIFT;
         const size_t bytes = std::min<size_t>(size, BUFFER_PAGE_BYTES - offset_in_page);
         const size_t last_bit = (offset_in_page + bytes - 1) >> BUFFER_BYTES_PER_BITSHIFT;

@@ -180,13 +180,7 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                 // Native programs are lowered while the environment is built (once: the
                 // ShaderInfo keeps the result for the pipeline's environments).
                 RethrowIfRejected(*cpu_shader_addr);
-                GraphicsEnvironment env{*maxwell3d,
-                                        *gpu_memory,
-                                        program,
-                                        native ? shader_addr : base_addr,
-                                        start_address,
-                                        {},
-                                        native_tensor_full_by_default};
+                GraphicsEnvironment env{*maxwell3d, *gpu_memory, program, native ? shader_addr : base_addr, start_address};
                 shader_info = MakeShaderInfo(env, *cpu_shader_addr);
             } catch (const Shader::Exception&) {
                 RememberRejection(*cpu_shader_addr);
@@ -256,8 +250,7 @@ const ShaderInfo* ShaderCache::ComputeShader() {
     }
     try {
         RethrowIfRejected(*cpu_shader_addr);
-        ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start, {},
-                               native_tensor_full_by_default};
+        ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start};
         return MakeShaderInfo(env, *cpu_shader_addr);
     } catch (const Shader::Exception&) {
         RememberRejection(*cpu_shader_addr);
@@ -303,8 +296,7 @@ void ShaderCache::GetGraphicsEnvironments(GraphicsEnvironments& result,
             ? (static_cast<u64>(config.reserved[0] & 0xff) << 32) | config.reserved[1]
             : base_addr;
         env = GraphicsEnvironment{*maxwell3d, *gpu_memory, program, address, start_address,
-                                  shader_infos[index]->lowered_native,
-                                  native_tensor_full_by_default};
+                                  shader_infos[index]->lowered_native};
         env.SetCachedSize(shader_infos[index]->size_bytes);
         result.env_ptrs[env_index++] = &env;
     }
