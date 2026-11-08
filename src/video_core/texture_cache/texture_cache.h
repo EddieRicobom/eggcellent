@@ -3181,122 +3181,6 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             return false;
         }
     };
-    // Whether one of the GPU copies below writes all of a single-level 2D image, so an upload
-    // before it is never seen. Ocarina of Time creates a D32 image at each new size of a
-    // dynamic-resolution target over the same memory, uploading 6-14 MiB of it each time.
-    const auto overwritten_by_copies = [&] {
-        const ImageInfo& image_info = new_image.info;
-        constexpr ImageFlagBits unusual = ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
-                                          ImageFlagBits::SparseTiles |
-                                          ImageFlagBits::UnwrittenSparse | ImageFlagBits::Unbacked;
-        if (image_info.type != ImageType::e2D || image_info.resources.levels != 1 ||
-            image_info.resources.layers != 1 || image_info.num_samples != 1 ||
-            True(new_image.flags & (unusual | ImageFlagBits::Converted |
-                                    ImageFlagBits::AsynchronousDecode))) {
-            return false;
-        }
-        const auto blocks = [](const ImageInfo& of, s32 level) {
-            const Extent3D size = MipSize(of.size, static_cast<u32>(level));
-            return Extent2D{
-                .width = Common::DivCeil(size.width, DefaultBlockWidth(of.format)),
-                .height = Common::DivCeil(size.height, DefaultBlockHeight(of.format)),
-            };
-        };
-        const Extent2D new_blocks = blocks(image_info, 0);
-        const auto covers = [&](const ImageInfo& overlap_info, s32 level) {
-            const Extent2D overlap_blocks = blocks(overlap_info, level);
-            return overlap_blocks.width >= new_blocks.width &&
-                   overlap_blocks.height >= new_blocks.height;
-        };
-        for (const JoinCopy& copy : join_copies_to_do) {
-            const ImageBase& overlap = slot_images[copy.id];
-            if (overlap.info.type != ImageType::e2D || overlap.info.num_samples != 1 ||
-                True(overlap.flags & unusual) ||
-                GetFormatType(overlap.info.format) != GetFormatType(image_info.format) ||
-                BytesPerBlock(overlap.info.format) != BytesPerBlock(image_info.format) ||
-                overlap.info.astc_opaque != image_info.astc_opaque) {
-                continue;
-            }
-            if (!copy.is_alias) {
-                // Copied whole (MakeShrinkImageCopies) when the GPU wrote it.
-                const std::optional<SubresourceBase> base = new_image.TryFindBase(overlap.gpu_addr);
-                if (True(overlap.flags & ImageFlagBits::GpuModified) && base &&
-                    base->level == 0 && base->layer == 0) {
-                    return true;
-                }
-                continue;
-            }
-            if (!overlap.IsSafeGpuCopy()) {
-                continue;
-            }
-            // The extent AddImageAlias gives the copy: the smaller of the two at the base found.
-            constexpr auto options = RelaxedOptions::Size | RelaxedOptions::Format;
-            if (std::ranges::find(join_left_aliased_ids, copy.id) != join_left_aliased_ids.end()) {
-                const std::optional<SubresourceBase> base =
-                    FindSubresource(image_info, overlap, new_image.gpu_addr, options, false, true);
-                if (base && covers(overlap.info, base->level)) {
-                    return true;
-                }
-            } else {
-                const std::optional<SubresourceBase> base =
-                    FindSubresource(overlap.info, new_image, overlap.gpu_addr, options, false, true);
-                if (base && base->level == 0 && base->layer == 0 && covers(overlap.info, 0)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    };
-    const bool clear_skip = overwritten_by_clear();
-    // EDEN_NX2_EXP8 bit 2: skip the upload the copies overwrite.
-    const bool copy_skip =
-        !clear_skip && (VideoCore::Nx2Debug::Experiment(8) & 2) != 0 && overwritten_by_copies();
-    if (VideoCore::Nx2Debug::Experiment(7) != 0 && new_image.guest_size_bytes >= 4_MiB)
-        [[unlikely]] {
-        // Why a large new image was (or was not) uploaded from guest memory.
-        static std::atomic<u32> logged{};
-        if (logged.fetch_add(1, std::memory_order_relaxed) < 300) {
-            u32 aliases = 0;
-            u32 gpu_written = 0;
-            for (const JoinCopy& copy : join_copies_to_do) {
-                aliases += copy.is_alias ? 1 : 0;
-                const bool gpu = True(slot_images[copy.id].flags & ImageFlagBits::GpuModified);
-                gpu_written += gpu ? 1 : 0;
-            }
-            LOG_WARNING(HW_GPU,
-                        "New image format {} {}x{}x{} levels {} layers {} at {:#x}: {} copies "
-                        "({} aliases, {} GPU-written), {} bad overlaps, clearing {}, covered {}, "
-                        "upload {}",
-                        static_cast<u32>(new_info.format), new_info.size.width,
-                        new_info.size.height, new_info.size.depth, new_info.resources.levels,
-                        new_info.resources.layers, new_image.gpu_addr, join_copies_to_do.size(),
-                        aliases, gpu_written, join_bad_overlap_ids.size(),
-                        clearing_render_targets, overwritten_by_copies(),
-                        clear_skip  ? "skipped (clear)"
-                        : copy_skip ? "skipped (copies)"
-                                    : "done");
-        }
-    }
-    if (clear_skip) {
-        // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
-        // IsFullClear agrees the clear covers the whole image, and uploads it otherwise.
-        runtime.TransitionImageLayout(new_image);
-    } else if (copy_skip) {
-        // As RefreshContents leaves it, with the contents the copies write.
-        new_image.flags &= ~ImageFlagBits::CpuModified;
-        TrackImage(new_image, new_image_id);
-        runtime.TransitionImageLayout(new_image);
-    } else {
-        // TODO: Only upload what we need
-        RefreshContents(new_image, new_image_id);
-    }
-
-    if (can_rescale) {
-        ScaleUp(new_image);
-    } else if (!started_scaled) {
-        ScaleDown(new_image);
-    }
-
     std::ranges::sort(join_copies_to_do, [this](const JoinCopy& lhs, const JoinCopy& rhs) {
         const ImageBase& lhs_image = slot_images[lhs.id];
         const ImageBase& rhs_image = slot_images[rhs.id];
@@ -3336,21 +3220,71 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         }
     }
 
-    for (const auto& copy_object : join_copies_to_do) {
+    // The copy from an alias into the new image, or null when the loop below skips it.
+    const auto alias_copy = [&](const JoinCopy& copy) -> const AliasedImage* {
+        if (!copy.is_alias) {
+            return nullptr;
+        }
+        const Image& overlap = slot_images[copy.id];
+        if (!overlap.IsSafeGpuCopy() || overlap.info.num_samples != new_image.info.num_samples) {
+            return nullptr;
+        }
+        const auto alias_pointer = join_alias_indices.find(copy.id);
+        if (alias_pointer == join_alias_indices.end()) {
+            return nullptr;
+        }
+        return &new_image.aliased_images[alias_pointer->second];
+    };
+    // Copies run oldest first. When one of them writes the whole image, the upload from guest
+    // memory and the alias copies before it would be overwritten whole: neither is made. Ocarina
+    // of Time resizes a shadow map every frame in parts of Kokiri Forest, at the same address:
+    // each size is a new depth target and a new texture, both copied from older sizes, and their
+    // uploads took up to 17% of the GPU back thread there. Only at 1x: a rescaled copy's extent is
+    // the scaled guest mip size, which can fall short of the host mip (a 5 px wide image at 2x:
+    // host mip 1 is 5 px, the copy 4).
+    size_t first_copy = 0;
+    bool copied_whole = false;
+    for (size_t index = join_copies_to_do.size(); !can_rescale && index-- > 0;) {
+        const AliasedImage* const aliased = alias_copy(join_copies_to_do[index]);
+        if (aliased != nullptr &&
+            CopiesWriteWholeImage(new_image, slot_images[aliased->id], aliased->copies)) {
+            first_copy = index;
+            copied_whole = true;
+            break;
+        }
+    }
+    if (overwritten_by_clear()) {
+        // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
+        // IsFullClear agrees the clear covers the whole image, and uploads it otherwise.
+        runtime.TransitionImageLayout(new_image);
+    } else if (copied_whole) {
+        // What RefreshContents does, without the upload.
+        new_image.flags &= ~ImageFlagBits::CpuModified;
+        if (False(new_image.flags & ImageFlagBits::Tracked)) {
+            TrackImage(new_image, new_image_id);
+        }
+        runtime.TransitionImageLayout(new_image);
+    } else {
+        // TODO: Only upload what we need
+        RefreshContents(new_image, new_image_id);
+    }
+
+    if (can_rescale) {
+        ScaleUp(new_image);
+    } else if (!started_scaled) {
+        ScaleDown(new_image);
+    }
+
+    for (size_t index = 0; index < join_copies_to_do.size(); ++index) {
+        const JoinCopy& copy_object = join_copies_to_do[index];
         Image& overlap = slot_images[copy_object.id];
         if (copy_object.is_alias) {
-            if (!overlap.IsSafeGpuCopy()) {
+            const AliasedImage* const aliased =
+                index >= first_copy ? alias_copy(copy_object) : nullptr;
+            if (aliased == nullptr) {
                 continue;
             }
-            if (overlap.info.num_samples != new_image.info.num_samples) {
-                continue;
-            }
-            const auto alias_pointer = join_alias_indices.find(copy_object.id);
-            if (alias_pointer == join_alias_indices.end()) {
-                continue;
-            }
-            const AliasedImage& aliased = new_image.aliased_images[alias_pointer->second];
-            CopyImage(new_image_id, aliased.id, aliased.copies);
+            CopyImage(new_image_id, aliased->id, aliased->copies);
             new_image.modification_tick = overlap.modification_tick;
             continue;
         }
