@@ -73,10 +73,16 @@ void SyncpointManager::IncrementHost(u32 syncpoint_id) {
 }
 
 void SyncpointManager::WaitGuest(u32 syncpoint_id, u32 expected_value) {
+    if (syncpoint_id >= NUM_MAX_SYNCPOINTS) {
+        return;
+    }
     Wait(syncpoints_guest[syncpoint_id], wait_guest_cv, expected_value);
 }
 
 void SyncpointManager::WaitHost(u32 syncpoint_id, u32 expected_value) {
+    if (syncpoint_id >= NUM_MAX_SYNCPOINTS) {
+        return;
+    }
     Wait(syncpoints_host[syncpoint_id], wait_host_cv, expected_value);
 }
 
