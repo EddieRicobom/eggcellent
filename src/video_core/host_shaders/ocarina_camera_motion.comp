@@ -25,7 +25,9 @@ void main() {
     if (depth >= 0 && depth <= 1 && previous.w > 1e-6) {
         vec2 displacement = (previous.xy / previous.w - clip.xy) * vec2(0.5, -0.5) * size;
         if (all(lessThanEqual(abs(displacement), vec2(65504)))) {
-            pixels = displacement;
+            // A still camera's matrix wobbles by about 0.1 px, which DLSS shows as a shaking image
+            // (dead zone from zortos293/Lichii#678).
+            pixels = mix(displacement, vec2(0), lessThan(abs(displacement), vec2(0.35)));
         }
     }
     imageStore(motion, pixel, vec4(pixels, 0, 0));
