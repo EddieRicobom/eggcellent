@@ -11,6 +11,7 @@
 #include <boost/algorithm/string/split.hpp>
 #include "common/fs/path_util.h"
 #include "common/game_presets.h"
+#include "qt_common/config/qt_config.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "frontend_common/settings_generator.h"
@@ -1485,6 +1486,8 @@ void MainWindow::ConnectWidgetEvents() {
 
     connect(game_list, &GameList::OpenPerGameGeneralRequested, this,
             &MainWindow::OnGameListOpenPerGameProperties);
+    connect(game_list, &GameList::ApplyRecommendedSettingsRequested, this,
+            &MainWindow::OnGameListApplyRecommendedSettings);
     connect(game_list, &GameList::LinkToRyujinxRequested, this, &MainWindow::OnLinkToRyujinx);
 
     connect(this, &MainWindow::UpdateInstallProgress, this, &MainWindow::IncrementInstallProgress);
@@ -2882,6 +2885,46 @@ void MainWindow::OnGameListOpenPerGameProperties(const std::string& file) {
     }
 
     OpenPerGameConfiguration(title_id, file);
+}
+
+void MainWindow::OnGameListApplyRecommendedSettings(u64 program_id) {
+    if (QtCommon::system->IsPoweredOn()) {
+        QMessageBox::information(this, tr("Recommended settings"),
+                                 tr("Stop the running game before applying its settings."));
+        return;
+    }
+    const bool is_mkw = program_id == Settings::MarioKartWorldProgramId;
+    const bool is_oot = program_id == Settings::OcarinaOfTimeProgramId;
+    if (!is_mkw && !is_oot) {
+        return;
+    }
+    const auto answer = QMessageBox::question(
+        this, tr("Recommended settings"),
+        tr("Save the recommended settings into this game's own configuration?
+
+"
+           "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, "
+           "FIFO Relaxed VSync, ScaleForce and FXAA. Your global settings are not changed."),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+    {
+        QtConfig game_config(fmt::format("{:016X}", program_id),
+                             Config::ConfigType::PerGameConfig);
+        if (is_mkw) {
+            Settings::SetMarioKartWorldRecommendedSettings(Settings::values, false);
+        } else {
+            Settings::SetOcarinaOfTimeRecommendedSettings(Settings::values, false);
+        }
+        game_config.SaveAllValues();
+    }
+    for (const auto& restore : Settings::values.linkage.restore_functions) {
+        restore();
+    }
+    LOG_INFO(Config, "Saved recommended per-game settings for {:016X}", program_id);
+    QMessageBox::information(this, tr("Recommended settings"),
+                             tr("The recommended settings were saved for this game."));
 }
 
 void MainWindow::OnLinkToRyujinx(const u64& program_id) {

@@ -18,6 +18,7 @@
 #include <QScrollBar>
 #include <QScroller>
 #include <QScrollerProperties>
+#include "common/game_presets.h"
 #include <QToolButton>
 #include <QVariantAnimation>
 #include <qlayoutitem.h>
@@ -522,6 +523,13 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
         edit_nup->setEnabled(!nup_conversion_running);
     }
     QAction* properties = context_menu.addAction(tr("Configure Game"));
+    QAction* recommended = nullptr;
+    if (program_id == Settings::MarioKartWorldProgramId ||
+        program_id == Settings::OcarinaOfTimeProgramId) {
+        recommended = context_menu.addAction(tr("Apply Recommended Settings"));
+        recommended->setToolTip(tr("Saves the recommended settings into this game's own "
+                                   "configuration. Your global settings are not changed."));
+    }
 
     favorite->setVisible(program_id != 0);
     favorite->setCheckable(true);
@@ -617,6 +625,10 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
 #endif
     connect(properties, &QAction::triggered, this,
             [this, path]() { emit OpenPerGameGeneralRequested(path); });
+    if (recommended) {
+        connect(recommended, &QAction::triggered, this,
+                [this, program_id]() { emit ApplyRecommendedSettingsRequested(program_id); });
+    }
 
     connect(ryujinx, &QAction::triggered, this,
             [this, program_id]() { emit LinkToRyujinxRequested(program_id); });
