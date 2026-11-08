@@ -367,6 +367,7 @@ private slots:
     void OnGameListAddDirectory();
     void OnGameListShowList(bool show);
     void OnGameListOpenPerGameProperties(const std::string& file);
+    void OnGameListApplyRecommendedSettings(u64 program_id);
     void OnLinkToRyujinx(const u64& program_id);
     void OnMenuLoadFile();
     void OnMenuLoadFolder();
