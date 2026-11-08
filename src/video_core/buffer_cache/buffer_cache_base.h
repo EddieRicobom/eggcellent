@@ -158,6 +158,10 @@ public:
     std::array<u64, NUM_STAGES> written_storage_buffers{};
     u64 enabled_compute_storage_buffers = 0;
     u64 written_compute_storage_buffers = 0;
+    // Bound by a native (Switch 2) compute program, whose pointers carry no size.
+    u64 native_compute_storage_buffers = 0;
+    // Bytes from each compute storage binding's start that a dispatch marks GPU-written.
+    std::array<u32, NUM_STORAGE_BUFFERS> compute_storage_write_marks{};
 
     u32 total_graphics_storage_buffers = 0;
     u32 total_compute_storage_buffers = 0;
