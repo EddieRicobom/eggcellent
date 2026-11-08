@@ -2967,11 +2967,6 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             }
         }
     }
-    // A render target with nothing to take from another image only ever uses its scaled image.
-    new_info.scaled_only = inserting_render_target && new_info.rescaleable && !new_info.is_sparse &&
-                           new_info.type == ImageType::e2D && new_info.num_samples == 1 &&
-                           Settings::values.resolution_info.active && join_copies_to_do.empty() &&
-                           !IsPixelFormatASTC(new_info.format) && !IsPixelFormatBCn(new_info.format);
     const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
     if constexpr (requires(const Image& image) { image.OutOfMemory(); }) {
         if (slot_images[new_image_id].OutOfMemory()) {
