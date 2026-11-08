@@ -300,7 +300,8 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
                      gpu.ShaderNotify()),
       accelerate_dma(buffer_cache, texture_cache, scheduler),
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
-      frame_dump(device, memory_allocator, scheduler) {
+      frame_dump(device, memory_allocator, scheduler),
+      flash_watch(device, memory_allocator, scheduler) {
     scheduler.SetQueryCache(query_cache);
     buffer_cache.SetPendingCpuWrites(
         [this](const std::function<void(DAddr, size_t)>& callback) {
@@ -1762,7 +1763,6 @@ void RasterizerVulkan::DispatchCompute() {
     }
 
     const auto& qmd{kepler_compute->launch_description};
-    auto indirect_address = kepler_compute->GetIndirectComputeAddress();
     // Earlier writes must be visible to the dispatch, its indirect arguments included, and what it
     // writes to the next render pass.
     const auto record_read_barrier = [this] {
@@ -1780,7 +1780,7 @@ void RasterizerVulkan::DispatchCompute() {
         });
         scheduler.NoteComputeWrites();
     };
-    if (frame_dump.CapturingBuffers()) {
+    if (frame_dump.CapturingSampled()) {
         std::optional<std::array<u32, 3>> indirect_grid;
         if (indirect_address) {
             indirect_grid = std::array{gpu_memory->Read<u32>(*indirect_address),
@@ -1821,6 +1821,24 @@ void RasterizerVulkan::DispatchCompute() {
     }
     scheduler.RequestOutsideRenderPassOperationContext();
     record_read_barrier();
+#ifdef EGLANTINE_STREAMLINE
+    if (marking_effects) {
+        const auto written = pipeline->WrittenImages();
+        if (std::ranges::any_of(written, [this](VideoCommon::ImageViewId id) {
+                return id && texture_cache.GetImageView(id).gpu_addr == oot_effects_address;
+            })) {
+            oot_live_dlss->MarkEffects(oot_effects_scene, render_trace_frame);
+            oot_effects_frame.reset();
+        }
+    }
+    const auto* const replacement =
+        can_replace && !byte_addressed_shadow && TryOcarinaDlss(*pipeline, true)
+            ? oot_live_dlss.get()
+            : nullptr;
+    if (!replacement) {
+        scheduler.TraceComputePipeline(pipeline->ShaderHash());
+    }
+#else
     scheduler.TraceComputePipeline(pipeline->ShaderHash());
 #endif
     scheduler.Record([this, pipeline, dim, byte_addressed_shadow, bind = std::move(deferred_bind)
