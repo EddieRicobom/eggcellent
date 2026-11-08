@@ -11,6 +11,7 @@ mudanças, o que olhar em cada um e como trazê-las para a `main`.
 |---|---|---|---|
 | Alta | [Djihads80/Eglantine](https://github.com/Djihads80/Eglantine) | Branch `nx2`; releases `daily-AAAAMMDD`; releases de branch (`branch-fix-*`, `branch-exp-*`); PRs abertos de OOT (#614, #613, #663, #678, #685) | Upstream principal. Quase tudo que o Eggcellent mescla vem daqui. |
 | Alta | [Frizti/Lichii](https://github.com/Frizti/Lichii) | Releases `frizti-vN` e commits | Performance e menos stutter de shader no Ocarina of Time (OOT). |
+| Alta | [Frizti/Fritchii](https://github.com/Frizti/Fritchii) | Releases `fritchii-vN` (v4 em 2026-11-08) e branch `nx2` | Fork do Lichii focado no OOT: correção do pisca-pisca da água, exposição em Hyrule Field, DLSS, HMMA em cooperative matrix e botão de 60/30 FPS. Testado em RTX 4080. |
 | Média | [zortos293/Lichii](https://github.com/zortos293/Lichii) | PRs mergeados e commits | Fonte dos merges do Frizti. |
 | Média | [sylvieistaken/selevet-eglantine](https://github.com/sylvieistaken/selevet-eglantine) | Releases `selevet-eglantine-performance-N` | Ganhos de GPU portados de várias forks. |
 | Baixa | [PokeDinner-a-Eglantine-Fork](https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork) (Forgejo) | Branch `master` e PRs | Mouse do Joy-Con 2, DK Bananza e Mario Kart World. Já mesclado uma vez. |
