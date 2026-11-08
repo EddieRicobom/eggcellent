@@ -3048,9 +3048,7 @@ void MainWindow::OnGameListApplyRecommendedSettings(u64 program_id) {
     }
     const auto answer = QMessageBox::question(
         this, tr("Recommended settings"),
-        tr("Save the recommended settings into this game's own configuration?
-
-"
+        tr("Save the recommended settings into this game's own configuration?\n\n"
            "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, "
            "FIFO Relaxed VSync, ScaleForce and FXAA. Your global settings are not changed."),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
