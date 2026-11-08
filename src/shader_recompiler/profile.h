@@ -107,6 +107,10 @@ struct Profile {
     bool has_broken_spirv_subgroup_mask_vector_extract_dynamic{};
     bool has_broken_spirv_subgroup_shuffle{};
     bool has_broken_spirv_fragment_shuffle{};
+    /// The guest's HMMA.16816.F16 runs on a cooperative matrix, in compute shaders
+    bool support_cooperative_hmma{};
+    /// Without the above, HMMA runs on 16x16x16 cooperative matrices through shared memory
+    bool support_cooperative_hmma_16x16x16{};
     u32 max_subgroup_size{};
 
     u32 gl_max_compute_smem_size{};
