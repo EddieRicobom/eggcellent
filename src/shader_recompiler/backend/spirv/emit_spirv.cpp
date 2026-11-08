@@ -245,12 +245,6 @@ Id DefineMain(EmitContext& ctx, IR::Program& program) {
     for (IR::Block* const block : program.blocks) {
         block->SetDefinition(ctx.OpLabel());
     }
-    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
-        if (node.type == IR::AbstractSyntaxNode::Type::Block) {
-            ctx.entry_block = node.data.block;
-            break;
-        }
-    }
     Traverse(ctx, program);
     ctx.OpFunctionEnd();
     return main;
