@@ -161,6 +161,26 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 images_deleted{};
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
     bool debug_stats{}; ///< Collect what only the debug statistics lines use
+    /// EDEN_NX2_RT_EVICT_PRESSURE: fresh render targets to check, with their allocation tick and
+    /// how often they were found still in use.
+    struct TransientTarget {
+        ImageId id;
+        u64 allocation_tick;
+        u64 check_tick;
+        u32 survived;
+    };
+    std::deque<TransientTarget> transient_targets;
+    u64 transient_evictions{};
+    u64 logged_transient_evictions{};
+    /// EDEN_NX2_RT_EVICT_PRESSURE=<frames> (default 8, 0 = off): how long a fresh render target
+    /// may go unused before it is deleted while the cache is over its expected size.
+    [[nodiscard]] static u64 RtEvictPressureFrames() {
+        static const u64 frames = [] {
+            const char* value = std::getenv("EDEN_NX2_RT_EVICT_PRESSURE");
+            return value != nullptr ? std::strtoull(value, nullptr, 10) : u64{8};
+        }();
+        return frames;
+    }
 
     static constexpr s64 DEFAULT_EXPECTED_MEMORY = 1_GiB + 125_MiB;
     static constexpr s64 DEFAULT_CRITICAL_MEMORY = 1_GiB + 625_MiB;
