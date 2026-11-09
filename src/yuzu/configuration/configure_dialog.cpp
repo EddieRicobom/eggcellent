@@ -144,7 +144,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
         ui->selectorList->setFixedWidth(180);
         layout()->setSizeConstraint(QLayout::SetNoConstraint);
         setMinimumSize(640, 460);
-        resize(940, 680);
+        resize(1080, 700);
     }
 
     // Selects the leftmost button on the bottom bar (Cancel as of writing)
