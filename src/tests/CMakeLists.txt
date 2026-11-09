@@ -44,6 +44,8 @@ add_executable(tests
     video_core/storage_write_extent.cpp
     video_core/storage_buffer_control_flow.cpp
     core/nup_validation.cpp
+    core/vfs_vector.cpp
+    core/file_sys_parsers.cpp
     input_common/calibration_lifetime.cpp
     input_common/tas_input.cpp
     video_core/ampere_logged_numeric.cpp
