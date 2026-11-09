@@ -138,6 +138,8 @@ add_library(core STATIC
     file_sys/registered_cache.h
     file_sys/nup_container.cpp
     file_sys/nup_container.h
+    file_sys/nx2_shader_extract.cpp
+    file_sys/nx2_shader_extract.h
     file_sys/nup_writer.cpp
     file_sys/nup_writer.h
     file_sys/romfs.cpp
@@ -377,6 +379,8 @@ add_library(core STATIC
     hle/kernel/svc/svc_light_ipc.cpp
     hle/kernel/svc/svc_lock.cpp
     hle/kernel/svc/svc_memory.cpp
+    hle/kernel/svc/svc_nx2_oot_poll.cpp
+    hle/kernel/svc/svc_nx2_oot_present.cpp
     hle/kernel/svc/svc_physical_memory.cpp
     hle/kernel/svc/svc_port.cpp
     hle/kernel/svc/svc_power_management.cpp

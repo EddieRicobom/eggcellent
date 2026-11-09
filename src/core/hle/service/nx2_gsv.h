@@ -43,6 +43,7 @@
 #include "core/perf_stats.h"
 #include "video_core/gpu.h"
 #include "video_core/nx2_perf.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/framebuffer_config.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_client_session.h"
@@ -282,6 +283,14 @@ private:
         request.syncpoint = syncpoint;
         request.pending = true;
         auto& manager = system.Host1x().GetSyncpointManager();
+        // The render-frame clock's flip-fence source learns the frame fence's slot from these
+        // arms and takes each later arm on it as the next frame's end (video_core/nx2_frame_fence.h).
+        if (Tegra::g_nx2_render_clock_wanted.load(std::memory_order_relaxed) &&
+            Tegra::Nx2RenderClockFlipSource()) {
+            Tegra::g_nx2_frame_fence.NoteArm((u64{m_session_id} << 32) | slot, syncpoint,
+                                             static_cast<u32>(value),
+                                             manager.GetGuestSyncpointValue(syncpoint));
+        }
         // The action runs on the GPU thread under the manager's lock, or inline if the value is
         // already reached.
         request.handle = manager.RegisterGuestAction(
@@ -333,6 +342,7 @@ private:
     std::map<u32, Kernel::KEvent*> m_events;
     std::map<u32, SlotRequest> m_requests;
     std::shared_ptr<SharedState> m_shared = std::make_shared<SharedState>();
+    const u32 m_session_id = Tegra::g_nx2_syncpt_sessions.fetch_add(1) + 1;
 };
 
 // Placeholder for the Switch 2 GPU session (nn::gpu::sdk), handed out by gsv 497.
@@ -1890,9 +1900,11 @@ private:
     // at once (changes.patch's default mask is 0x7fff).
     void PresentClientBuffer(HLERequestContext& ctx) {
         Common::Nx2Timeline::OnPresent();
-        Common::Nx2Timeline::Span timeline_span{"guest present"};
+        // The frame boundary of tools/nx2/critical_path.py; "frame" is this present's number.
+        Common::Nx2Timeline::ArgSpan timeline_span{"guest present"};
         const auto* w = ctx.CommandBuffer();
         ++m_presents;
+        timeline_span.Set(0, {"frame", m_presents});
         if (Common::DkbFrameTrace::Enabled()) {
             m_vsync->trace_present.store(m_presents, std::memory_order_relaxed);
         }
@@ -1901,6 +1913,7 @@ private:
             LOG_INFO(Service, "nx2:vi2 229 present #{} token={:#x} slot={} image={}", m_presents,
                      u64{w[2]} | (u64{w[3]} << 32), w[4], w[5]);
         }
+        NoteFrameFence(~w[22], w[24]);
         // Wait for this frame's fence, so the game doesn't write the next frame's data (constant
         // buffers holding texture handles, vertex data, Pokopia's glyph atlas) while the GPU
         // thread still reads this frame's. But title 1's GPU waits on semaphores its CPU releases
@@ -2084,6 +2097,7 @@ private:
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};
+    u32 m_frame_fence_relearn_logs{}; // the first 8 frame-fence learn lines
 
     // The console flips one frame per 60 Hz vblank and keeps the rest queued, so a game can't
     // present faster than that. Every slot is reported free here: hold each present until the
@@ -2268,11 +2282,46 @@ private:
         u32 backoff{};
     } m_phase;
 
+    // The render-frame clock's flip-fence source (video_core/nx2_frame_fence.h, fable_answer_17):
+    // this flip's fence is the frame's end. It names the slot whose arms give the next ends,
+    // confirms the boundary the back bumped on, or bumps the clock itself when there was none.
+    void NoteFrameFence(u32 fence_id, u32 fence_value) {
+        if (fence_id >= 192 || !Tegra::g_nx2_render_clock_wanted.load(std::memory_order_relaxed) ||
+            !Tegra::Nx2RenderClockFlipSource()) {
+            return;
+        }
+        const auto events = Tegra::g_nx2_frame_fence.NoteFlip(
+            fence_id, fence_value,
+            system.Host1x().GetSyncpointManager().GetGuestSyncpointValue(fence_id));
+        if (events.bump) {
+            Tegra::g_nx2_render_frame.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (events.syncpoint_learned && m_frame_fence_relearn_logs++ < 8) {
+            LOG_INFO(Service, "Render frame clock: frame fence on syncpoint {} (flip #{}, value {:#x})",
+                     fence_id, m_presents, fence_value);
+        }
+        if ((events.slot_learned || events.slot_relearned) && m_frame_fence_relearn_logs++ < 8) {
+            LOG_INFO(Service,
+                     "Render frame clock: frame fence {} on nx2:syncpt session {} slot {:#x} "
+                     "(flip #{}, value {:#x}); its arms are the next frames' ends",
+                     events.slot_learned ? "armed" : "now armed", events.slot_key >> 32,
+                     static_cast<u32>(events.slot_key), m_presents, fence_value);
+        }
+        if (events.fault) {
+            LOG_WARNING(Service,
+                        "Render frame clock: the back bumped on armed value {:#x} that no flip "
+                        "carried (flip #{} at {:#x}); armed source off, only flips bump from now on",
+                        events.early_value, m_presents, fence_value);
+        }
+    }
+
     /// Waits until the fence is reached. With `unless_gpu_waits`, gives up after a few ms once a
     /// GPU channel was seen suspended on a semaphore (it may be one this thread releases later).
     /// Returns whether the fence was reached.
     bool WaitForFrame(u32 fence_id, u32 fence_value, bool unless_gpu_waits = false) {
-        Common::Nx2Timeline::Span timeline_span{"present: wait for frame fence"};
+        // Ended by the guest syncpoint increment ("syncpoint: guest increment", on the back).
+        Common::Nx2Timeline::ArgSpan timeline_span{"present: wait for frame fence",
+                                                   {"syncpoint", fence_id}, {"value", fence_value}};
         if (fence_id >= 192) {
             return true;
         }
@@ -2740,6 +2789,13 @@ private:
 
     void SetVsyncSlot(u32 index, bool on) {
         auto* event = m_native_events[index];
+        if (event != nullptr && Common::Nx2Timeline::GuestEnabled()) {
+            // A guest wait on a vsync slot is a wait for the display (critical_path.py's
+            // "display"); an unbound slot fires on a change notification only.
+            Common::Nx2Timeline::NameObject(
+                static_cast<const Kernel::KSynchronizationObject*>(&event->GetReadableEvent()),
+                fmt::format("{} {}", on ? "vsync slot" : "display slot", index));
+        }
         std::scoped_lock lk{m_vsync->mutex};
         auto& list = m_vsync->events;
         const auto it = std::find(list.begin(), list.end(), event);
@@ -3824,6 +3880,10 @@ public:
     }
 
     ~INx2GraphicsSystemSession() override {
+        if (m_syncpt_poll_now) {
+            system.Host1x().GetSyncpointManager().SetGuestIncrementHook(nullptr, nullptr);
+            system.CoreTiming().UnscheduleEvent(m_syncpt_poll_now);
+        }
         if (m_syncpt_poll) {
             system.CoreTiming().UnscheduleEvent(m_syncpt_poll);
         }
@@ -4001,6 +4061,24 @@ private:
                 system.CoreTiming().ScheduleLoopingEvent(SyncptPollInterval, SyncptPollInterval,
                                                          m_syncpt_poll);
             }
+            if (!m_syncpt_poll_now) {
+                // The driver's armed waits were answered only by the 500 us poll: the guest's
+                // syncpoint value reached the shared page up to 500 us late, and Ocarina of
+                // Time's present poll then slept up to 1 ms more (Fable answer 9). With EXP37 a
+                // guest increment queues one poll at once, on the same timing thread.
+                m_syncpt_poll_now = Core::Timing::CreateEvent(
+                    "nx2:gsv:SyncptPollNow",
+                    [this](s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                        m_syncpt_poll_now_pending.store(false, std::memory_order_release);
+                        PollSyncpts();
+                        return std::nullopt;
+                    });
+                system.Host1x().GetSyncpointManager().SetGuestIncrementHook(
+                    [](void* context) {
+                        static_cast<INx2GraphicsSystemSession*>(context)->OnGuestIncrement();
+                    },
+                    this);
+            }
         } else {
             LOG_ERROR(Service, "nx2:gsv TIPC 204: missing syncpt transfer memory");
         }
@@ -4028,6 +4106,15 @@ private:
             }
         }
         return changed;
+    }
+
+    /// A guest syncpoint was incremented (any thread): with EXP37, poll at once.
+    void OnGuestIncrement() {
+        if (VideoCore::Nx2Debug::Experiment(37) == 0 ||
+            m_syncpt_poll_now_pending.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        system.CoreTiming().ScheduleEvent(std::chrono::nanoseconds{0}, m_syncpt_poll_now);
     }
 
     // Answers every armed wait: the value page is current, so the client rechecks its threshold
@@ -4525,6 +4612,10 @@ private:
     u64 m_syncpt_ro{};
     u32 m_syncpt_count{};
     std::shared_ptr<Core::Timing::EventType> m_syncpt_poll;
+    /// EDEN_NX2_EXP37: PollSyncpts at once after a guest syncpoint increment (OnGuestIncrement),
+    /// at most one pending.
+    std::shared_ptr<Core::Timing::EventType> m_syncpt_poll_now;
+    std::atomic<bool> m_syncpt_poll_now_pending{};
 };
 
 } // namespace Service

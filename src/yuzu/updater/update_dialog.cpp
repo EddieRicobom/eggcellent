@@ -3,6 +3,8 @@
 
 #include <filesystem>
 #include <utility>
+#include <QTimer>
+#include <QEventLoop>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -26,6 +28,8 @@
 #endif
 #include "ui_update_dialog.h"
 #include "update_dialog.h"
+#include "yuzu/fritchii/fritchii_ui.h"
+#include "yuzu/fritchii/whats_new.h"
 
 #include "common/httplib.h"
 
@@ -119,6 +123,16 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release,
     }
 
     ui->body->setMarkdown(QString::fromStdString(text));
+    if (FritchiiUi::Enabled()) {
+        // The notes come first: no download instructions, roomier type.
+        setWindowTitle(tr("Update"));
+        ui->body->setObjectName(QStringLiteral("FritchiiNotes"));
+        FritchiiUi::SetNotes(ui->body, FritchiiUi::CleanReleaseNotes(
+                                           QString::fromStdString(release.body)));
+        ui->version->setObjectName(QStringLiteral("FritchiiDialogTitle"));
+        ui->version->setWordWrap(true);
+        resize(700, 640);
+    }
 
     ui->buttonBox->button(QDialogButtonBox::No)->setText(tr("Remind Me Later"));
     auto* skip = ui->buttonBox->addButton(tr("Skip This Version"), QDialogButtonBox::ActionRole);
@@ -127,9 +141,12 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release,
     if (m_fritchii) {
         m_asset = *fritchii_asset;
         ui->groupBox->setHidden(true);
-        ui->version->setText(tr("%1 is available. You have Fritchii v%2.")
-                                 .arg(QString::fromStdString(release.title),
-                                      QString::fromStdString(RunningVersionText())));
+        ui->version->setText(
+            FritchiiUi::Enabled()
+                ? tr("%1 is ready").arg(QString::fromStdString(release.title))
+                : tr("%1 is available. You have Fritchii v%2.")
+                      .arg(QString::fromStdString(release.title),
+                           QString::fromStdString(RunningVersionText())));
         auto* install = ui->buttonBox->button(QDialogButtonBox::Yes);
         if (m_asset.sha256.empty()) {
             // Without a published checksum there is nothing to verify the download against.
@@ -394,8 +411,36 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
         return true;
     };
 
-    // Now send off request
-    auto result = client->Get(m_asset.path, content_receiver, progress_callback);
+    // Now send off request. GitHub's file server sometimes answers 502-504 or drops the
+    // connection for a moment (v5.2's release hour): try up to three times, a few seconds apart,
+    // starting the file over each time. The size and SHA-256 checks below still decide.
+    constexpr int attempts = 3;
+    httplib::Result result;
+    for (int attempt = 1; attempt <= attempts; ++attempt) {
+        if (attempt > 1) {
+            file.seek(0);
+            file.resize(0);
+            hash.reset();
+            received = 0;
+            progress->setValue(0);
+            progress->setLabelText(tr("Downloading... (try %1 of %2)").arg(attempt).arg(attempts));
+            QEventLoop wait;
+            QTimer::singleShot(2000 * (attempt - 1), &wait, &QEventLoop::quit);
+            wait.exec();
+            if (progress->wasCanceled()) {
+                break;
+            }
+        }
+        result = client->Get(m_asset.path, content_receiver, progress_callback);
+        const bool canceled = !result && result.error() == httplib::Error::Canceled;
+        const bool transient = (!result && !canceled) ||
+                               (result && (result->status >= 500 || result->status == 429));
+        if (!transient || attempt == attempts) {
+            break;
+        }
+        LOG_WARNING(Frontend, "GET to {}{} failed ({}), trying again", m_asset.url, m_asset.path,
+                    result ? std::to_string(result->status) : httplib::to_string(result.error()));
+    }
     progress->close();
 
     if (!result) {

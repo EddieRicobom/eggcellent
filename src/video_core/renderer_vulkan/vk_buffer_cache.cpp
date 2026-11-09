@@ -544,6 +544,13 @@ void BufferCacheRuntime::WaitSubmittedTick(u64 tick, u64 writer) {
     if (master.IsFree(tick)) {
         return;
     }
+    // The split's front waits for the GPU: the back runs meanwhile what the front sent, also the
+    // entries since the front's last publish, which it does not see yet (fewer than 256 words;
+    // zortos293/Lichii#805 34656e8225).
+    if (auto& split = VideoCommon::GpuSplit::Get();
+        split.Active() && !VideoCommon::GpuSplit::OnBackThread()) {
+        split.Publish();
+    }
     if (ListWaitTrace* const trace = ListWaitTrace::Get()) [[unlikely]] {
         master.Refresh();
         const u64 known = master.KnownGpuTick();
@@ -631,8 +638,12 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
         }
         cmdbuf.CopyBuffer(src_buffer, dst_buffer, vk_copies);
         if (barrier) {
+            // Later transfers too: a reordered upload of the same bytes in a later submission
+            // (RecordWithUploadBuffer, ahead of that submission's work) has no barrier of its
+            // own before it, and in-order copies don't count as uses for CanReorderUpload.
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                   vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, WRITE_BARRIER);
+                                   vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, 0,
+                                   WRITE_BARRIER);
         }
     });
 }
@@ -660,8 +671,11 @@ void BufferCacheRuntime::PostCopyBarrier() {
     };
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([](vk::CommandBuffer cmdbuf) {
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
-                               0, WRITE_BARRIER);
+        // Later transfers too, as after CopyBuffer's own barrier: the downloads, gathers and
+        // compute uploads this closes are in-order copies a later reordered upload of the same
+        // bytes would not wait for.
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, 0, WRITE_BARRIER);
     });
 }
 

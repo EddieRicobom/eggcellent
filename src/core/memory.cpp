@@ -39,6 +39,8 @@
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/nx2.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/rasterizer_download_area.h"
 
 namespace Core::Memory {
@@ -1001,9 +1003,26 @@ struct Memory::Impl {
             // It is often the case the games like to access wildly different addresses. Hence why I propose
             // we should let the compiler just do it's thing...
             if (current_area.last_address != subaddress) {
+                // EDEN_NX2_EXP35: a page no GPU write ever marked (bits that never clear) is
+                // collected like a GPU-modified one instead of asking OnCPUWrite under both
+                // caches' mutexes, which the split's back holds through each draw (4% of the
+                // guest cores' busy time at Castle Town). The back applies collected writes to
+                // both caches at its next FlushCaching, before each draw, dispatch and clear.
+                // EXP35=2: every page, GPU-written ones too (their writes are collected anyway
+                // when OnCPUWrite finds them GPU-modified; the clean ones' WriteMemory becomes the
+                // same marks at the back's next FlushCaching). The cache mutexes are held in bursts
+                // through the back's draws: guest threads slept 5-6 ms on them (Fable answer 11).
+                const int collect_mode = VideoCore::Nx2Debug::Experiment(35);
+                const bool collect_unasked =
+                    address != 0 && size != 0 && collect_mode != 0 &&
+                    Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+                    (collect_mode == 2 || !Tegra::Nx2MayBeGpuWritten(address, size));
+                if (collect_unasked) {
+                    Tegra::g_nx2_guest_writes_collected.fetch_add(1, std::memory_order_relaxed);
+                }
                 // Short circuit the need to check for address/size
-                auto const do_collection = (address != 0 && size != 0)
-                    && system.GPU().OnCPUWrite(address, size);
+                auto const do_collection = collect_unasked || ((address != 0 && size != 0)
+                    && system.GPU().OnCPUWrite(address, size));
                 if (do_collection) {
                     current_area.last_address = subaddress;
                 } else {
@@ -1011,6 +1030,9 @@ struct Memory::Impl {
                 }
             }
             gpu_dirty_managers[core].Collect(address, size);
+            // A download writing to guest memory here may have looked at the collected writes
+            // before this one: its bytes would land over the ones stored after this returns.
+            VideoCore::DownloadLanding::Await(address, size);
             // last_address stays on the page after its GPU-written state is gone, so these
             // writes can land on pages the buffer cache holds as clean until the next gather.
             g_collected_write_pages.Mark(address, size);

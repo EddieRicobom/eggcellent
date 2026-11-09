@@ -38,6 +38,7 @@ add_executable(tests
     video_core/fast_fusion_surface_store.cpp
     video_core/fast_fusion_byte_store.cpp
     video_core/vk_byte_addressed_shadow.cpp
+    video_core/canonical_native_key.cpp
     video_core/global_memory_coherence.cpp
     video_core/storage_buffer_pointer_tracking.cpp
     video_core/storage_write_extent.cpp
@@ -58,6 +59,7 @@ add_executable(tests
     video_core/submission_policy.cpp
     video_core/framebuffer_clear_layers.cpp
     video_core/framebuffer_limits.cpp
+    video_core/unbacked_fallback.cpp
     video_core/fire_emblem_upscale.cpp
     video_core/query_copy.cpp
     video_core/dlss_contract.cpp
@@ -74,11 +76,13 @@ add_executable(tests
     video_core/pipeline_optimization.cpp
     video_core/spirv_atomic_retry.cpp
     video_core/spirv_fragment_shuffle.cpp
+    video_core/mesh_fallback.cpp
     video_core/multi_range_refresh.cpp
     video_core/command_fetch_order.cpp
     video_core/gpu_written_pages.cpp
     video_core/command_writer.cpp
     video_core/split_fence_wait.cpp
+    video_core/async_report_wait.cpp
     video_core/command_snapshot_suspensions.cpp
     video_core/pending_maps.cpp
     video_core/maxwell_fast_method.cpp
@@ -101,6 +105,7 @@ add_executable(tests
     video_core/ampere_tennis_i2f.cpp
     video_core/ampere_tennis_tessellation.cpp
     video_core/pipeline_cache_files.cpp
+    video_core/shader_object_pool.cpp
     video_core/storage_binding_capacity.cpp
     video_core/native_indirect_reset.cpp
     video_core/native_qmd.cpp
@@ -113,6 +118,7 @@ add_executable(tests
     video_core/spirv_min_max_denorms.cpp
     video_core/spirv_nan_safe_min_max.cpp
     common/bit_field.cpp
+    common/bit_util.cpp
     common/cityhash.cpp
     common/container_hash.cpp
     common/event.cpp

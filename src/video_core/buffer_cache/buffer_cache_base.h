@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <array>
 #include <bit>
+#include <bitset>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -22,6 +23,7 @@
 #include <vector>
 
 #include "common/container/unordered_map.h"
+#include <boost/unordered/unordered_node_map.hpp>
 #include <boost/container/static_vector.hpp>
 #include <boost/container/small_vector.hpp>
 
@@ -46,6 +48,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_download_trace.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
@@ -265,7 +268,9 @@ public:
     /// CPU writes collected but not yet applied (SetPendingCpuWrites).
     [[nodiscard]] Common::RangeSet<DAddr> PendingCpuWriteRanges();
 
-    /// Writes downloaded bytes to guest memory, except over `cpu_written`.
+    /// Writes downloaded bytes to guest memory, except over `cpu_written`. Callers take
+    /// `cpu_written` inside a VideoCore::DownloadLanding over the bytes and write in it: the CPU
+    /// writes collected after it store their bytes once the landing has ended.
     void WriteDownloadedMemory(const Common::RangeSet<DAddr>& cpu_written, DAddr device_addr,
                                const u8* data, u64 size);
 
@@ -343,6 +348,10 @@ public:
     [[nodiscard]] std::pair<Buffer*, u32> ObtainCPUBuffer(DAddr gpu_addr, u32 size,
                                                           ObtainBufferSynchronize sync_info,
                                                           ObtainBufferOperation post_op);
+
+    /// GPU work recorded now reads or writes these bytes, of a buffer obtained before (work set
+    /// up once that keeps reading them, as conditional rendering does). Creates no buffer.
+    void MarkUsed(DAddr device_addr, u64 size);
     void FlushCachedWrites();
 
     /// Where the CPU writes into GPU-written memory that were collected but not applied yet
@@ -395,6 +404,10 @@ public:
     /// write once the GPU is done with it. Unknown otherwise: the caller drains and flushes.
     /// Pages draws write are only Synced or Unknown, and NeedsSync until `past_sync`: the
     /// split's back ran the work before the last host-level wait (GpuSplit::WaitForSync).
+    /// EXP40 & 1 (zortos293/Lichii#805 34656e8225): Synced too when no GPU work wrote the bytes
+    /// [device_addr, device_addr + out.size()) since the page was flushed, or the host wrote them
+    /// since; Copied reads the words GPU work wrote from the copy and, once the page was flushed,
+    /// the others from guest memory.
     Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync);
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
@@ -402,8 +415,9 @@ public:
     /// since it was last flushed with one GPU wait, and notes the latter synced. Each page's next
     /// lists then read guest memory instead of draining and flushing one page at a time.
     void Nx2FlushListPages(std::span<const DAddr> pages);
-    /// CPU and inline writes: they reach guest memory, so a synced page stays synced, but its copy
-    /// no longer holds the page.
+    /// CPU, inline and copy engine writes of bytes guest memory holds: they reach guest memory,
+    /// so a synced page stays synced and the words they cover whole are guest memory's again, but
+    /// the page's copy no longer holds the page.
     void Nx2NoteListHostWrite(DAddr device_addr, u64 size);
 
     /// Return true when a CPU region is modified from the GPU
@@ -502,7 +516,10 @@ public:
         u64 changed_frame = ~u64{0};
         bool recheck = false;
     };
-    std::unordered_map<DAddr, NativeBankPage> native_indirect_page_snapshots;
+    /// Node map: NoteNativeBankPageChanged keeps pointers to earlier pages' words until the bind's
+    /// uploads are flushed, so entries must not move (std::unordered_map's lookups were ~2% of the
+    /// split's back at Castle Town, 600k a second).
+    boost::unordered_node_map<DAddr, NativeBankPage> native_indirect_page_snapshots;
     /// Counts graphics draws (UpdateGraphicsBuffers) for EDEN_NX2_EXP4 & 2.
     u64 native_bank_draw = 0;
     /// EDEN_NX2_EXP4 != 0: bank check cost, logged every 5 s.
@@ -537,6 +554,19 @@ public:
         std::array<u64, BankReasons> changed{};
         std::chrono::steady_clock::time_point last_log{};
     } native_bank_tracked_stats;
+    /// EDEN_NX2_EXP26 & 4: changed bank pages of one bind, copied to the host buffer from their
+    /// snapshots (FlushNativeBankUploads) instead of being marked CPU-modified. A 64 KiB bank
+    /// spans at most 17 pages.
+    struct NativeBankUpload {
+        DAddr page;
+        const u8* words;
+    };
+    static constexpr size_t NativeBankUploadCapacity = 32;
+    struct NativeBankUploads {
+        /// Only the first `count` are set (left uninitialized: one of these per bank bind).
+        std::array<NativeBankUpload, NativeBankUploadCapacity> pages;
+        size_t count = 0;
+    };
 
 private:
     template <typename Mask, typename Func>
@@ -584,7 +614,19 @@ private:
     void BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 binding_index, bool needs_bind);
 
     /// EDEN_NX2_EXP9: the native uniform bank check of a bind of [device_addr, device_addr + size).
-    void CheckNativeBankPagesTracked(DAddr device_addr, u32 size, int mode);
+    /// EDEN_NX2_EXP26 (bits, see Experiment in nx2_debug_control.h): `trims`; with & 4 changed
+    /// pages that lie whole in `buffer` are uploaded from their snapshots.
+    void CheckNativeBankPagesTracked(DAddr device_addr, u32 size, int mode, int trims,
+                                     Buffer& buffer);
+
+    /// A native bank page whose snapshot was just (re)taken: marked CPU-modified, or with
+    /// EXP26 & 4 (`upload_to` not null) queued in `uploads` when it lies whole in that buffer and
+    /// holds no GPU-written data.
+    void NoteNativeBankPageChanged(DAddr page, const u8* words, Buffer* upload_to,
+                                   NativeBankUploads& uploads);
+
+    /// EDEN_NX2_EXP26 & 4: copies the queued pages' snapshots into `buffer`.
+    void FlushNativeBankUploads(Buffer& buffer, const NativeBankUploads& uploads);
 
     void BindHostGraphicsStorageBuffers(size_t stage);
 
@@ -628,11 +670,17 @@ private:
 
     void UpdateComputeTextureBuffers();
 
-    void MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync = false);
+    /// `capped`: `size` is EDEN_NX2_WRITTEN_SSBO_MARK_KIB's cap, below the binding's size, so the
+    /// GPU may write past it (Nx2NoteListWrite).
+    void MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync = false,
+                           bool capped = false);
 
-    /// Counts a GPU write to the command list pages in the range (invalidating their copies) and,
-    /// while collecting, asks for new copies.
-    void Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64 size);
+    /// Counts a GPU write to the command list pages in the range (invalidating their copies),
+    /// notes the words it may write (Nx2ListPage::gpu_words) and, while collecting, asks for new
+    /// copies. `to_page_end`: the GPU may write past the range (a capped mark), so the words up to
+    /// the end of its last page count as written too.
+    void Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64 size,
+                          bool to_page_end = false);
 
     [[nodiscard]] BufferId FindBuffer(DAddr device_addr, u32 size, bool sparse_compatible);
 
@@ -640,7 +688,10 @@ private:
 
     [[nodiscard]] OverlapResult ResolveOverlaps(DAddr device_addr, u32 wanted_size);
 
-    void JoinOverlap(BufferId new_buffer_id, BufferId overlap_id, bool accumulate_stream_score);
+    /// Returns whether it copied (false: skipped as wholly CPU-modified, EDEN_NX2_JOIN_SKIP_CPU).
+    bool JoinOverlap(BufferId new_buffer_id, BufferId overlap_id, bool accumulate_stream_score);
+    /// The range's host contents are all stale and nothing else reads them (JoinOverlap).
+    [[nodiscard]] bool JoinCopyIsDead(DAddr device_addr, u64 size);
 
     [[nodiscard]] BufferId CreateBuffer(DAddr device_addr, u32 wanted_size,
                                         bool sparse_compatible);
@@ -917,8 +968,9 @@ private:
 
     /// A command list page (Nx2CopyListPages): the GPU writes noted to it and the last copy.
     using Nx2Staging = decltype(std::declval<Runtime&>().DownloadStagingBuffer(size_t{}, true));
+    static constexpr size_t Nx2ListPageWords = (size_t{1} << Tegra::Nx2WrittenPageBits) / 4;
     struct Nx2ListPage {
-        u64 writes{};      ///< GPU writes noted to the page
+        u64 writes{};      ///< GPU and host writes noted to the page
         u64 copy_writes{}; ///< `writes` when the copy was made: the copy is current while equal
         u64 copy_tick{};   ///< GPU tick that completes the copy
         /// `writes` when the front last flushed the page: guest memory holds it while equal
@@ -932,8 +984,26 @@ private:
         /// the page's lists read guest memory once the back ran the work before the last such
         /// wait and no write came since the front flushed the page (Nx2ReadListCopy).
         bool draw_written{};
+        /// The page's 4-byte words GPU work wrote that guest memory does not hold: set by the GPU
+        /// writes noted to the page (the whole range a dispatch or copy may write), cleared for
+        /// the words the host writes whole and for every word once the front flushed the page.
+        /// Once it did (`flushed`), guest memory holds the other words, so a list on none of
+        /// these reads it directly (EXP40 & 1). Before, GPU work may have written the page before
+        /// it became a command list page, unnoted.
+        std::bitset<Nx2ListPageWords> gpu_words;
+        bool flushed{};
         std::optional<Nx2Staging> copy;
     };
+    /// Sets (`set`) or clears the words of `entry.gpu_words` within [begin, end) bytes of its
+    /// page: every word the bytes touch when setting, only the words they cover when clearing.
+    static void Nx2MarkListWords(Nx2ListPage& entry, u64 begin, u64 end, bool set);
+    /// Whether GPU work wrote any word of [begin, end) bytes of the page that guest memory lacks.
+    [[nodiscard]] static bool Nx2HasListWords(const Nx2ListPage& entry, u64 begin, u64 end);
+    /// Fills `out` with the page's bytes from `offset` (`device_addr`) on: the words of
+    /// `entry.gpu_words` from its copy, the others from guest memory once the page was flushed
+    /// (EXP40 & 1); else, or for EDEN_NX2_LIST_VERIFY's read as before, all from the copy.
+    void Nx2ReadListWords(const Nx2ListPage& entry, DAddr device_addr, u64 offset,
+                          std::span<u8> out);
     std::mutex nx2_list_mutex; ///< nx2_list_pages: the split's front reads the copies
     std::unordered_map<DAddr, Nx2ListPage> nx2_list_pages;
     /// Copies replaced while the GPU may still write them: freed once it is past their tick.

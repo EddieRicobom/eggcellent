@@ -27,6 +27,9 @@
 #include <ranges>
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "video_core/churn_counters.h"
+#include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -870,6 +873,17 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             }
         }
     }
+    // Counts the allocator's vkAllocateMemory / vkFreeMemory calls (blocks and dedicated
+    // memory) for the "Churn (600 frames)" line.
+    static const VmaDeviceMemoryCallbacks churn_callbacks{
+        .pfnAllocate = [](VmaAllocator, uint32_t, VkDeviceMemory, VkDeviceSize, void*) {
+            VideoCommon::Churn::Add(VideoCommon::Churn::DeviceAllocations);
+        },
+        .pfnFree = [](VmaAllocator, uint32_t, VkDeviceMemory, VkDeviceSize, void*) {
+            VideoCommon::Churn::Add(VideoCommon::Churn::DeviceFrees);
+        },
+        .pUserData = nullptr,
+    };
     const VmaAllocatorCreateInfo allocator_info{
             .flags = flags,
             .physicalDevice = physical,
@@ -883,7 +897,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             // block (8 MiB) their own memory, which goes back to the driver when they are freed.
             .preferredLargeHeapBlockSize = 16u * 1024u * 1024u,
             .pAllocationCallbacks = nullptr,
-            .pDeviceMemoryCallbacks = nullptr,
+            .pDeviceMemoryCallbacks = &churn_callbacks,
             .pHeapSizeLimit = heap_size_limit != 0 ? heap_size_limits.data() : nullptr,
             .pVulkanFunctions = &functions,
             .instance = instance,
@@ -1210,6 +1224,41 @@ bool Device::GetSuitability(bool requires_swapchain) {
     if (supported_extensions.contains(PORTABILITY_SUBSET_EXTENSION_NAME)) {
         loaded_extensions.emplace(PORTABILITY_SUBSET_EXTENSION_NAME);
     }
+    // Graphics pipelines linked from per-stage libraries (vk_pipeline_library): the Shader
+    // libraries setting turns them on for NVIDIA GPUs and AMD's Mesa driver (Intel and others are
+    // untested), EDEN_NX2_GPL=1 for any GPU, EDEN_NX2_GPL=0 turns them off. Not on AMD's Windows
+    // driver: RX 5000 and 6000 owners crash building library pipelines from their cache
+    // (amdvlk64.dll; unticking Shader libraries is their workaround, 2026-11-09), and the
+    // precompile preparation now does the first-time builds those libraries were for.
+    graphics_pipeline_library_requested = [this] {
+        if (const char* value = std::getenv("EDEN_NX2_GPL"); value && *value) {
+            return *value != '0';
+        }
+        const u32 vendor = properties.properties.vendorID;
+        // Not properties.driver: it is read further down (it was 0 here, and v5.2 left the
+        // libraries on for these cards). On Windows AMD's Vulkan driver is the proprietary one.
+#ifdef _WIN32
+        constexpr bool amd_windows_driver = true;
+#else
+        constexpr bool amd_windows_driver = false;
+#endif
+        if (vendor == 0x1002 && amd_windows_driver &&
+            Settings::values.use_graphics_pipeline_library.GetValue()) {
+            LOG_INFO(Render_Vulkan, "Nx2Perf gpl: shader libraries off on AMD's proprietary "
+                                    "driver (EDEN_NX2_GPL=1 turns them on)");
+            return false;
+        }
+        return Settings::values.use_graphics_pipeline_library.GetValue() &&
+               (vendor == 0x10DE || vendor == 0x1002);
+    }();
+    if (graphics_pipeline_library_requested &&
+        supported_extensions.contains(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+        supported_extensions.contains(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME)) {
+        loaded_extensions.insert(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+        loaded_extensions.insert(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+    } else {
+        graphics_pipeline_library_requested = false;
+    }
 
     extensions.depth_stencil_resolve =
         extensions.depth_stencil_resolve &&
@@ -1323,6 +1372,12 @@ bool Device::GetSuitability(bool requires_swapchain) {
 #undef EXT_FEATURE
 #undef FEATURE
 
+    if (graphics_pipeline_library_requested) {
+        graphics_pipeline_library_features.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT;
+        SetNext(next, graphics_pipeline_library_features);
+    }
+
     // Perform the feature test.
     physical.GetFeatures2(features2);
 
@@ -1423,6 +1478,12 @@ bool Device::GetSuitability(bool requires_swapchain) {
         properties.integer_dot_product.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES;
         SetNext(next, properties.integer_dot_product);
+    }
+
+    if (graphics_pipeline_library_requested) {
+        properties.graphics_pipeline_library.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT;
+        SetNext(next, properties.graphics_pipeline_library);
     }
 
     // Perform the property fetch.
@@ -1698,8 +1759,38 @@ void Device::RemoveUnsuitableExtensions() {
     features.mesh_shader.primitiveFragmentShadingRateMeshShader = VK_FALSE;
     features.mesh_shader.meshShaderQueries = VK_FALSE;
     extensions.mesh_shader = features.mesh_shader.taskShader && features.mesh_shader.meshShader;
+    // EDEN_NX2_FORCE_MESH_FALLBACK=1: leave VK_EXT_mesh_shader disabled, so task/mesh draws take
+    // the compute fallback a device without it uses.
+    if (extensions.mesh_shader && std::getenv("EDEN_NX2_FORCE_MESH_FALLBACK") != nullptr) {
+        LOG_WARNING(Render_Vulkan, "EDEN_NX2_FORCE_MESH_FALLBACK: VK_EXT_mesh_shader disabled");
+        extensions.mesh_shader = false;
+    }
     RemoveExtensionFeatureIfUnsuitable(extensions.mesh_shader, features.mesh_shader,
                                        VK_EXT_MESH_SHADER_EXTENSION_NAME);
+
+    // VK_EXT_graphics_pipeline_library (EDEN_NX2_GPL): used only with fast linking, which makes
+    // a link cost a fraction of a millisecond.
+    if (graphics_pipeline_library_requested) {
+        const bool usable =
+            graphics_pipeline_library_features.graphicsPipelineLibrary &&
+            properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking;
+        if (!usable) {
+            LOG_WARNING(Render_Vulkan,
+                        "Nx2Perf gpl: the device has no graphics pipeline library fast linking, "
+                        "shader libraries off");
+            loaded_extensions.erase(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+            loaded_extensions.erase(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+            graphics_pipeline_library_features.graphicsPipelineLibrary = VK_FALSE;
+        }
+        graphics_pipeline_library_enabled = usable;
+        if (usable) {
+            LOG_INFO(Render_Vulkan,
+                     "Nx2Perf gpl: graphics pipeline libraries on (fast linking, independent "
+                     "interpolation decoration {})",
+                     properties.graphics_pipeline_library
+                         .graphicsPipelineLibraryIndependentInterpolationDecoration);
+        }
+    }
 
     // VK_KHR_shader_quad_control
     // Quad control depends on maximal reconvergence; advertise neither unless
@@ -1760,9 +1851,9 @@ void Device::RemoveUnsuitableExtensions() {
         // Gated-off devices are not asked for their shapes.
         const auto shapes = usable ? physical.GetCooperativeMatrixPropertiesKHR()
                                    : std::vector<VkCooperativeMatrixPropertiesKHR>{};
-        const auto has_shape = [&](u32 columns) {
+        const auto has_shape = [&](u32 rows, u32 columns) {
             return std::ranges::any_of(shapes, [=](const VkCooperativeMatrixPropertiesKHR& shape) {
-                return shape.MSize == 16 && shape.NSize == columns && shape.KSize == 16 &&
+                return shape.MSize == rows && shape.NSize == columns && shape.KSize == 16 &&
                        shape.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
                        shape.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
                        shape.CType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
@@ -1772,7 +1863,7 @@ void Device::RemoveUnsuitableExtensions() {
             });
         };
         cooperative_hmma_16x8x16 =
-            usable && has_shape(8) &&
+            usable && has_shape(16, 8) &&
             (properties.subgroup_properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
             properties.subgroup_properties.subgroupSize == GuestWarpSize &&
             // Compute subgroups may vary between these sizes (always with SPIR-V 1.6), and the
@@ -1780,8 +1871,18 @@ void Device::RemoveUnsuitableExtensions() {
             properties.subgroup_size_control.minSubgroupSize == GuestWarpSize &&
             properties.subgroup_size_control.maxSubgroupSize == GuestWarpSize;
         cooperative_hmma_16x16x16 =
-            usable && has_shape(16) && IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
-        extensions.cooperative_matrix = cooperative_hmma_16x8x16 || cooperative_hmma_16x16x16;
+            usable && has_shape(16, 16) && IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+        // Intel Xe2 (ANV) only has 8x16x16: each HMMA is two products of 8 rows. Intel only, so
+        // NVIDIA and AMD keep exactly the paths above (zortos293/Lichii#779). Not Intel's Windows
+        // driver: the constructor turns its shaderFloat16 off after this check ("Intel has broken
+        // float16 math"), and the matrices need it; #779 was measured on Mesa ANV.
+        constexpr u32 intel_vendor_id = 0x8086;
+        cooperative_hmma_8x16x16 =
+            usable && properties.properties.vendorID == intel_vendor_id &&
+            driver_id != VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS && has_shape(8, 16) &&
+            IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+        extensions.cooperative_matrix =
+            cooperative_hmma_16x8x16 || cooperative_hmma_16x16x16 || cooperative_hmma_8x16x16;
         features.cooperative_matrix.cooperativeMatrixRobustBufferAccess = VK_FALSE;
         RemoveExtensionFeatureIfUnsuitable(extensions.cooperative_matrix,
                                            features.cooperative_matrix,
@@ -1897,6 +1998,28 @@ void Device::ReleaseCustomBorderColorSamplers(size_t count) const {
 }
 
 u64 Device::GetDeviceMemoryUsage() const {
+    // EDEN_NX2_EXP29 & 1 (zortos293/Lichii#717 EDEN_NX2_MEMSTAT_MS): the buffer and texture
+    // caches ask every frame; with the budget extension each answer is a driver and OS query.
+    // An answer younger than 50 ms is reused (so the caches' GC sees usage up to 50 ms old).
+    if ((VideoCore::Nx2Debug::Experiment(29) & 1) == 0) {
+        return QueryDeviceMemoryUsage();
+    }
+    constexpr s64 reuse_ns = 50'000'000;
+    const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    const s64 last = memory_usage_time.load(std::memory_order_acquire);
+    if (last != 0 && now - last < reuse_ns) {
+        return memory_usage_value.load(std::memory_order_relaxed);
+    }
+    const u64 usage = QueryDeviceMemoryUsage();
+    memory_usage_value.store(usage, std::memory_order_relaxed);
+    memory_usage_time.store(now, std::memory_order_release);
+    return usage;
+}
+
+u64 Device::QueryDeviceMemoryUsage() const {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::MemoryQuery};
     VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{};
     budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
     physical.GetMemoryProperties(&budget);

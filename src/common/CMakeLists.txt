@@ -45,9 +45,12 @@ add_library(
     div_ceil.h
     dkb_cpu_trace.cpp
     dkb_cpu_trace.h
+    jit_symbols.cpp
+    jit_symbols.h
     nx2_sampler.cpp
     nx2_sampler.h
     nx2_movie_clock.h
+    nx2_gpu_write_listener.h
     dynamic_library.cpp
     dynamic_library.h
     elf.h
@@ -104,6 +107,7 @@ add_library(
     ${CMAKE_CURRENT_BINARY_DIR}/scm_rev.cpp
     scm_rev.h
     scope_exit.h
+    shutdown_progress.h
     spin_recursive_mutex.h
     scratch_buffer.h
     settings.cpp

@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <condition_variable>
 #include <memory>
@@ -36,6 +38,7 @@
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/gpu_split.h"
+#include "video_core/gpu_wait_site.h"
 #include "video_core/native_query_trace.h"
 #include "video_core/native_indirect_reset.h"
 #include "video_core/render_trace.h"
@@ -272,7 +275,149 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
             (topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
              device.IsPatchListPrimitiveRestartSupported()));
 }
+
+/// Before a dispatch: earlier writes visible to it, its indirect arguments included.
+void RecordDispatchBarrier(vk::CommandBuffer cmdbuf) {
+    static constexpr VkMemoryBarrier READ_BARRIER{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+    };
+    cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+                           VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           0, READ_BARRIER);
+}
 } // Anonymous namespace
+
+void RasterizerVulkan::ReadMeshEmulationProbe() {
+    const MeshEmulationProbe probe{mesh_probe};
+    mesh_probe.pending = false;
+    const size_t num_words{probe.data.size() / sizeof(u32)};
+    const auto word = [&](u64 index) -> u32 {
+        if (index >= num_words) {
+            return 0;
+        }
+        u32 value;
+        std::memcpy(&value, probe.data.data() + index * sizeof(u32), sizeof(value));
+        return value;
+    };
+    const auto position = [&](u64 base, u32 vertex) {
+        std::array<f32, 4> result{};
+        for (u32 element = 0; element < 4; ++element) {
+            const u32 line{probe.position_lines[element]};
+            if (line != ~0U) {
+                result[element] = std::bit_cast<f32>(word(base + u64{vertex} * probe.vertex_lines +
+                                                          line));
+            }
+        }
+        return result;
+    };
+    u64 triangles{}, degenerate{}, outside{}, bad_index{};
+    std::string sample;
+    for (u32 group = 0; group < probe.groups; ++group) {
+        const u64 base{u64{group} * probe.block_words};
+        const u64 index_base{base + u64{probe.max_vertices} * probe.vertex_lines};
+        for (u32 primitive = 0; primitive < probe.max_primitives; ++primitive) {
+            const std::array<u32, 3> indices{word(index_base + primitive * 3),
+                                             word(index_base + primitive * 3 + 1),
+                                             word(index_base + primitive * 3 + 2)};
+            if (indices[0] == indices[1] && indices[1] == indices[2]) {
+                ++degenerate;
+                continue;
+            }
+            ++triangles;
+            bool any_bad{};
+            bool any_inside{};
+            for (const u32 vertex : indices) {
+                if (vertex >= probe.max_vertices) {
+                    any_bad = true;
+                    continue;
+                }
+                const auto p{position(base, vertex)};
+                const f32 w{std::abs(p[3])};
+                any_inside |= w > 0.0f && std::abs(p[0]) <= w && std::abs(p[1]) <= w;
+            }
+            bad_index += any_bad;
+            outside += !any_inside;
+            if (sample.size() < 400 && triangles <= 2) {
+                for (const u32 vertex : indices) {
+                    const auto p{position(base, std::min(vertex, probe.max_vertices - 1))};
+                    sample += fmt::format(" g{} v{} ({:.3g} {:.3g} {:.3g} {:.3g})", group, vertex,
+                                          p[0], p[1], p[2], p[3]);
+                }
+            }
+        }
+    }
+    LOG_INFO(Render_Vulkan,
+             "Mesh emulation probe frame {}: {} groups, {} triangles ({} degenerate slots), {} "
+             "with every vertex off screen, {} with a bad index; first triangles:{}",
+             probe.frame, probe.groups, triangles, degenerate, outside, bad_index, sample);
+}
+
+const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
+    const u64 tick{scheduler.CurrentTick()};
+    if (mesh_arena_current < mesh_arenas.size() && mesh_arenas[mesh_arena_current].tick == tick) {
+        return mesh_arenas[mesh_arena_current];
+    }
+    // A finished submission's counter holds the words its draws asked for, including those
+    // that did not fit: grow later arenas to hold them.
+    const u64 max_size{(std::min)(u64{1} << 30, u64{device.GetMaxStorageBufferRange()})};
+    for (MeshArena& arena : mesh_arenas) {
+        if (arena.counted || !scheduler.IsFree(arena.tick)) {
+            continue;
+        }
+        arena.counted = true;
+        arena.counter.Invalidate();
+        u32 words;
+        std::memcpy(&words, arena.counter.Mapped().data(), sizeof(words));
+        const u64 needed{u64{words} * 4};
+        if (needed > arena.size && mesh_arena_size < max_size) {
+            mesh_arena_size = (std::min)(std::bit_ceil(needed + needed / 4), max_size);
+            LOG_INFO(Render_Vulkan, "Mesh emulation: a submission needed {} MiB of output, arenas "
+                                    "grow to {} MiB",
+                     needed >> 20, mesh_arena_size >> 20);
+        }
+    }
+    std::erase_if(mesh_arenas, [&](const MeshArena& arena) {
+        return arena.counted && arena.size < mesh_arena_size;
+    });
+    auto it{std::ranges::find_if(mesh_arenas, [](const MeshArena& arena) { return arena.counted; })};
+    if (it == mesh_arenas.end()) {
+        const auto make_buffer = [&](u64 size, VkBufferUsageFlags usage, MemoryUsage memory) {
+            return memory_allocator.CreateBuffer(
+                VkBufferCreateInfo{
+                    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .size = size,
+                    .usage = usage,
+                    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                    .queueFamilyIndexCount = 0,
+                    .pQueueFamilyIndices = nullptr,
+                },
+                memory);
+        };
+        it = mesh_arenas.insert(
+            mesh_arenas.end(),
+            MeshArena{
+                .buffer = make_buffer(mesh_arena_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                      MemoryUsage::DeviceLocal),
+                .counter = make_buffer(sizeof(u32), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                       MemoryUsage::Download),
+                .size = mesh_arena_size,
+            });
+    }
+    // The GPU is done with this arena, and this submission's commands have not been sent yet.
+    const u32 zero{};
+    std::memcpy(it->counter.Mapped().data(), &zero, sizeof(zero));
+    it->counter.Flush();
+    it->tick = tick;
+    it->counted = false;
+    mesh_arena_current = static_cast<size_t>(std::distance(mesh_arenas.begin(), it));
+    return *it;
+}
 
 RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra::GPU& gpu_,
                                    Tegra::MaxwellDeviceMemoryManager& device_memory_,
@@ -424,6 +569,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
 
     SCOPE_EXIT {
+        const VideoCommon::Nx2Profile::FineScope tick_scope{
+            VideoCommon::Nx2Profile::Zone::TickWork};
         gpu.TickWork();
     };
     bool submitted = false;
@@ -462,6 +609,12 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         if (frame_dump.Capturing()) {
             frame_dump.NoteSkipped(false, ps != 0 ? ps : vs, regs.rt[0].Address(), reason);
         }
+        // A missing pipeline is counted by class of target in the "Async discard" 10 s line
+        // instead; this capped list is kept for EDEN_NX2_ASYNC_DISCARD=1 (the default) only.
+        if (reason == "no pipeline" && pipeline_cache.LastLookupSkipped() &&
+            AsyncDiscardMode() != 1) {
+            return;
+        }
         if (seen.size() < 64 && seen.emplace(vs, ps, reason).second) {
             LOG_WARNING(HW_GPU, "Draw skipped ({}): vs={:#x} ps={:#x} rt0={:#x} {}x{}", reason, vs, ps,
                         regs.rt[0].Address(), regs.rt[0].width, regs.rt[0].height);
@@ -474,8 +627,30 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     if (!pipeline) {
         report_failure("no pipeline");
         TraceRenderState(is_indexed, "no-pipeline", nullptr);
+        // Mesh emulation survey: how many task/mesh draws a device without
+        // VK_EXT_mesh_shader drops, how many are indirect and how many groups they launch.
+        if (maxwell3d->regs.IsMeshEnabled() && !device.IsExtMeshShaderSupported()) {
+            static u64 draws{}, indirect{}, groups{}, max_groups{};
+            ++draws;
+            if (is_indirect) {
+                ++indirect;
+            } else {
+                const u64 count{maxwell3d->draw_manager.draw_state.vertex_buffer.count};
+                groups += count;
+                max_groups = std::max(max_groups, count);
+            }
+            if (draws == 1 || draws % 5000 == 0) {
+                LOG_WARNING(Render_Vulkan,
+                            "Mesh emulation survey: {} mesh draws dropped, {} indirect, {} groups "
+                            "in direct ones (max {} per draw), frame {}",
+                            draws, indirect, groups, max_groups, render_trace_frame);
+            }
+        }
         return;
     }
+    // TEST: up to Configure (EDEN_NX2_GPU_PROFILE=2).
+    std::optional<Profile::FineScope> setup_scope;
+    setup_scope.emplace(Profile::Zone::DrawSetup);
     if (VideoCommon::OotNetwork::BypassEnabled(Settings::GetCurrentProgramID())) {
         TrackOotTonemappedImage(*pipeline);
     }
@@ -491,10 +666,145 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     if (no_mesh_file && (no_mesh_check++ % 1024) == 0) {
         no_mesh = std::filesystem::exists(no_mesh_file);
     }
-    if (mesh_draw && (no_mesh || !device.IsExtMeshShaderSupported())) {
-        report_failure(no_mesh ? "EDEN_NX2_NO_MESH" : "no VK_EXT_mesh_shader");
+    const bool emulated_mesh{mesh_draw && pipeline->IsEmulatedMesh()};
+    if (mesh_draw &&
+        (no_mesh || (!device.IsExtMeshShaderSupported() && !emulated_mesh) ||
+         (emulated_mesh && is_indirect))) {
+        report_failure(no_mesh         ? "EDEN_NX2_NO_MESH"
+                       : emulated_mesh ? "indirect emulated mesh draw"
+                                       : "no VK_EXT_mesh_shader");
         TraceRenderState(is_indexed, "mesh-skipped", nullptr);
         return;
+    }
+    // Mesh emulation: one output block per mesh workgroup, written by the pipeline's compute
+    // dispatch and drawn as groups * vertices-per-group triangle list vertices.
+    mesh_emulation_groups = 0;
+    mesh_emulation_vertices_per_group = 0;
+    if (emulated_mesh) {
+        // The same group count the native path hands vkCmdDrawMeshTasksEXT (MakeDrawParams:
+        // the index count for indexed draws), within the device's dispatch limit.
+        const auto& draw_state{maxwell3d->draw_manager.draw_state};
+        const u32 groups{(std::min)(MakeDrawParams(draw_state, 1, is_indexed).num_vertices,
+                                    device.GetMaxComputeWorkGroupCount()[0])};
+        // Mesh emulation statistics: draws with and without groups, and the frames with any
+        // groups (the game culls on the GPU and sets the counts itself).
+        {
+            static u64 draws{}, empty{}, total_groups{}, frames{}, frames_drawn{};
+            static u64 last_frame{~0ULL};
+            static bool frame_drawn{};
+            if (render_trace_frame != last_frame) {
+                if (last_frame != ~0ULL) {
+                    ++frames;
+                    frames_drawn += frame_drawn;
+                }
+                last_frame = render_trace_frame;
+                frame_drawn = false;
+            }
+            ++draws;
+            empty += groups == 0;
+            total_groups += groups;
+            frame_drawn |= groups != 0;
+            if (draws % 2000 == 0) {
+                LOG_INFO(Render_Vulkan,
+                         "Mesh emulation draws: {} ({} with no groups), {} groups; frames with "
+                         "emulated draws: {} of {}",
+                         draws, empty, total_groups, frames_drawn, frames);
+            }
+        }
+        // Read the pending probe before Request can hand its buffer out again.
+        if (mesh_probe.pending && scheduler.IsFree(mesh_probe.tick)) {
+            ReadMeshEmulationProbe();
+        }
+        // EDEN_NX2_MESH_EMULATION_PROBE=1: every 60 frames, read one draw's output back (from a
+        // host-visible download buffer, as device-local ones are not mapped on every GPU).
+        static const bool probe{std::getenv("EDEN_NX2_MESH_EMULATION_PROBE") != nullptr};
+        const bool has_task{pipeline->MeshEmulationHasTask()};
+        const bool probe_draw{probe && !has_task && !mesh_probe.pending && groups != 0 &&
+                              render_trace_frame % 60 == 0};
+        // With a task program the draw's groups are task workgroups. The mesh workgroups they ask
+        // for are only known on the GPU, so their output goes to the submission's arena.
+        const u64 block_bytes{pipeline->MeshEmulationBlockBytes()};
+        StagingBufferRef output{};
+        u64 bytes{};
+        if (has_task) {
+            const MeshArena& arena{AcquireMeshArena()};
+            bytes = arena.size;
+            pipeline->SetMeshEmulationOutput(*arena.buffer, 0, bytes, groups);
+        } else {
+            bytes = (std::max)(u64{groups} * block_bytes, u64{4});
+            output = staging_pool.Request(bytes, probe_draw ? MemoryUsage::Download
+                                                            : MemoryUsage::DeviceLocal);
+            pipeline->SetMeshEmulationOutput(output.buffer, output.offset, bytes, groups);
+        }
+        mesh_emulation_indirect = {};
+        if (mesh_task_probe.pending && scheduler.IsFree(mesh_task_probe.tick)) {
+            mesh_task_probe.pending = false;
+            std::array<u32, Shader::Backend::SPIRV::MESH_EMULATION_ARGS_WORDS> words{};
+            std::memcpy(words.data(), mesh_task_probe.args.data(), sizeof(words));
+            LOG_INFO(Render_Vulkan,
+                     "Mesh emulation task probe: {} tasks asked for {} mesh workgroups, {} "
+                     "dispatched at arena word {} (arena {} words)",
+                     mesh_task_probe.tasks,
+                     words[Shader::Backend::SPIRV::MESH_EMULATION_ARGS_REQUESTED], words[0],
+                     words[Shader::Backend::SPIRV::MESH_EMULATION_ARGS_BASE],
+                     mesh_task_probe.capacity);
+        }
+        if (has_task && groups != 0) {
+            const bool task_probe{probe && !mesh_task_probe.pending &&
+                                  render_trace_frame % 60 == 0};
+            const auto request = [&](u64 size, MemoryUsage usage = MemoryUsage::DeviceLocal) {
+                size = (std::max)(size, u64{16});
+                const StagingBufferRef ref{staging_pool.Request(size, usage)};
+                return std::make_pair(GraphicsPipeline::MeshEmulationBuffer{ref.buffer, ref.offset,
+                                                                            size},
+                                      ref.mapped_span.subspan(
+                                          (std::min)(ref.offset, u64{ref.mapped_span.size()})));
+            };
+            const auto payload{
+                request(u64{groups} * pipeline->MeshEmulationPayloadStride() * 4).first};
+            const auto offsets{request(u64{groups} * 4).first};
+            constexpr u64 args_bytes{Shader::Backend::SPIRV::MESH_EMULATION_ARGS_WORDS * 4};
+            const auto [args, args_span] =
+                request(args_bytes, task_probe ? MemoryUsage::Download : MemoryUsage::DeviceLocal);
+            const u32 capacity_words{static_cast<u32>(
+                (std::min)(bytes / 4, u64{(std::numeric_limits<u32>::max)()}))};
+            if (task_probe && args_span.size() >= args_bytes) {
+                mesh_task_probe = {
+                    .args = args_span,
+                    .tick = scheduler.CurrentTick(),
+                    .tasks = groups,
+                    .capacity = capacity_words,
+                    .pending = true,
+                };
+            }
+            const MeshArena& arena{mesh_arenas[mesh_arena_current]};
+            pipeline->SetMeshEmulationTaskBuffers(
+                payload, offsets, args, {*arena.counter, 0, sizeof(u32)}, capacity_words);
+            mesh_emulation_indirect = {args.buffer, args.offset};
+        }
+        if (probe_draw && output.mapped_span.size() >= output.offset + bytes) {
+            const MeshEmulationSetup& setup{*pipeline->MeshEmulation()};
+            mesh_probe = {
+                .data = output.mapped_span.subspan(output.offset, bytes),
+                .tick = scheduler.CurrentTick(),
+                .frame = render_trace_frame,
+                .groups = groups,
+                .block_words = setup.block_words,
+                .vertex_lines = setup.vertex_lines,
+                .max_vertices = setup.max_vertices,
+                .max_primitives = setup.max_primitives,
+                .position_lines = setup.position_lines,
+                .pending = true,
+            };
+        } else if (probe_draw && output.mapped_span.empty()) {
+            static bool warned{};
+            if (!warned) {
+                warned = true;
+                LOG_WARNING(Render_Vulkan, "Mesh emulation probe: output buffer is not mapped");
+            }
+        }
+        mesh_emulation_groups = groups;
+        mesh_emulation_vertices_per_group = pipeline->MeshEmulationVerticesPerGroup();
     }
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     // update engine as channel may be different.
@@ -511,6 +821,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             }
         }
     }
+    setup_scope.reset();
     if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed)) {
         report_failure("configure failed");
         TraceRenderState(is_indexed, "configure-failed", nullptr);
@@ -566,9 +877,13 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         UpdateDynamicStates(pipeline);
     }
 
-    query_cache.NotifySegment(true);
-    HandleTransformFeedback();
-    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
+    {
+        const Profile::FineScope queries_scope{Profile::Zone::DrawQueries};
+        query_cache.NotifySegment(true);
+        HandleTransformFeedback();
+        query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                                  maxwell3d->regs.zpass_pixel_count_enable);
+    }
     const std::optional<u32> probe =
         frame_dump.CapturingSampled() ? frame_dump.BeginProbe() : std::nullopt;
     {
@@ -1008,6 +1323,32 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             ++trace_zero_direct;
         }
 
+        if (mesh_draw && mesh_emulation_vertices_per_group != 0) {
+            const u32 vertices{mesh_emulation_groups * mesh_emulation_vertices_per_group};
+            if (vertices == 0) {
+                return;
+            }
+            if (mesh_emulation_indirect.buffer) {
+                // With a task program the distribution pass wrote the vertex count.
+                scheduler.Record([this, indirect = mesh_emulation_indirect](vk::CommandBuffer cmdbuf) {
+                    if (scheduler.GraphicsPipelineMissing()) {
+                        return;
+                    }
+                    cmdbuf.DrawIndirect(indirect.buffer,
+                                        indirect.offset +
+                                            Shader::Backend::SPIRV::MESH_EMULATION_DRAW_ARGS_OFFSET,
+                                        1, 0);
+                });
+                return;
+            }
+            scheduler.Record([this, vertices](vk::CommandBuffer cmdbuf) {
+                if (scheduler.GraphicsPipelineMissing()) {
+                    return;
+                }
+                cmdbuf.Draw(vertices, 1, 0, 0);
+            });
+            return;
+        }
         if (mesh_draw) {
             scheduler.Record([this, groups = draw_params.num_vertices](vk::CommandBuffer cmdbuf) {
                 if (scheduler.GraphicsPipelineMissing()) {
@@ -1427,8 +1768,64 @@ void RasterizerVulkan::Clear(u32 layer_count) {
                  regs.clear_color[1], regs.clear_color[2], regs.clear_color[3]);
     }
     TraceWindowTarget(*maxwell3d, *gpu_memory, "clear", layer_count);
+    // Slow clears (over 300 us) are logged with where the time went, at most 40 per 5 s: at the
+    // Castle Town route start the back's clear zone went 0.7 -> 4.6 ms a frame while an NPC walked
+    // past, at about the same number of clears.
+    const auto clear_start = std::chrono::steady_clock::now();
     FlushWork();
     gpu_memory->FlushCaching();
+    const auto clear_flushed = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point clear_targets_ready{};
+    // What the texture cache did for this clear's targets (JoinImages, framebuffers).
+    std::optional<TextureCache::RenderTargetStats> clear_tc_stats;
+    SCOPE_EXIT {
+        const auto end = std::chrono::steady_clock::now();
+        const auto us = [](auto d) {
+            return std::chrono::duration_cast<std::chrono::microseconds>(d).count();
+        };
+        if (end - clear_start < std::chrono::microseconds{300}) {
+            return;
+        }
+        static std::atomic<s64> window_start{};
+        static std::atomic<u32> logged{};
+        const s64 now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               end.time_since_epoch()).count();
+        if (now_ms - window_start.load(std::memory_order_relaxed) > 5000) {
+            window_start.store(now_ms, std::memory_order_relaxed);
+            logged.store(0, std::memory_order_relaxed);
+        }
+        if (logged.fetch_add(1, std::memory_order_relaxed) >= 40) {
+            return;
+        }
+        const auto& r = maxwell3d->regs;
+        const s64 targets_us = clear_targets_ready.time_since_epoch().count() != 0
+                                   ? us(clear_targets_ready - clear_flushed)
+                                   : -1;
+        LOG_INFO(Render_Vulkan,
+                 "Slow clear {} us (flush work {} us, render targets {} us): rt0 {:#x} {}x{} fmt "
+                 "{:#x}, zeta {:#x} {} fmt {:#x}, surface {:#x}, layers {}",
+                 us(end - clear_start), us(clear_flushed - clear_start), targets_us,
+                 r.rt[0].Address(), r.rt[0].width, r.rt[0].height, static_cast<u32>(r.rt[0].format),
+                 r.zeta.Address(), r.zeta_enable ? "on" : "off", static_cast<u32>(r.zeta.format),
+                 r.clear_surface.raw, layer_count);
+        if (clear_tc_stats) {
+            const auto& s = *clear_tc_stats;
+            const auto ns_us = [](u64 ns) { return ns / 1000; };
+            LOG_INFO(Render_Vulkan,
+                     "Slow clear texture cache: {} joins, {} created ({} pooled), {} relocated, "
+                     "{} retired, {} deleted, {} "
+                     "overlaps walked ({} bad), {} KiB uploaded; framebuffers {} created, {} "
+                     "removed, {} scanned, {} in the map; {} images; walk {} us, create {} us, "
+                     "upload {} us, delete {} us, framebuffers {} us",
+                     s.joins, s.images_created, s.pooled_images, s.relocated_images,
+                     s.retired_images, s.images_deleted,
+                     s.overlaps_walked, s.bad_overlaps, s.uploaded_bytes >> 10,
+                     s.framebuffers_created, s.framebuffers_removed, s.framebuffers_scanned,
+                     s.framebuffer_map_size, s.image_count,
+                     ns_us(s.walk_ns), ns_us(s.create_ns), ns_us(s.refresh_ns),
+                     ns_us(s.delete_ns), ns_us(s.framebuffer_ns));
+        }
+    };
 
     auto& regs = maxwell3d->regs;
     const bool use_color = regs.clear_surface.R || regs.clear_surface.G || regs.clear_surface.B ||
@@ -1440,8 +1837,11 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     }
 
     std::scoped_lock lock{texture_cache.mutex};
+    texture_cache.ResetRenderTargetStats();
     texture_cache.UpdateRenderTargets(true);
+    clear_targets_ready = std::chrono::steady_clock::now();
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
+    clear_tc_stats = texture_cache.TakeRenderTargetStats();
     if (frame_dump.Capturing() || flash_watch.WatchesPasses()) {
         FrameDumpPass(framebuffer);
     }
@@ -1779,23 +2179,9 @@ void RasterizerVulkan::DispatchCompute() {
         const u32 index = Tegra::Texture::TexturePair(handle, qmd.linked_tsc != 0).first;
         texture_cache.PublishComputeCollisionImage(index);
     };
-    // Earlier writes must be visible to the dispatch, its indirect arguments included, and what it
-    // writes to the next render pass.
-    const auto record_read_barrier = [this] {
-        static constexpr VkMemoryBarrier READ_BARRIER{
-            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-        };
-        scheduler.Record([](vk::CommandBuffer cmdbuf) {
-            cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
-                                   VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
-                                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                   0, READ_BARRIER);
-        });
-        scheduler.NoteComputeWrites();
-    };
+    // Earlier writes must be visible to the dispatch, its indirect arguments included
+    // (RecordDispatchBarrier, recorded at the start of the dispatch's own command), and what it
+    // writes to the next render pass (NoteComputeWrites).
     if (frame_dump.CapturingSampled()) {
         std::optional<std::array<u32, 3>> indirect_grid;
         if (indirect_address) {
@@ -1815,10 +2201,11 @@ void RasterizerVulkan::DispatchCompute() {
         const auto [buffer, offset] =
             buffer_cache.ObtainBuffer(*indirect_address, 12, sync_info, post_op);
         scheduler.RequestOutsideRenderPassOperationContext();
-        record_read_barrier();
+        scheduler.NoteComputeWrites();
         scheduler.TraceComputePipeline(pipeline->ShaderHash());
         scheduler.Record([this, pipeline, indirect_buffer = buffer->Handle(),
                           indirect_offset = offset](vk::CommandBuffer cmdbuf) {
+            RecordDispatchBarrier(cmdbuf);
             if (!pipeline->IsBound()) {
                 return;
             }
@@ -1837,7 +2224,11 @@ void RasterizerVulkan::DispatchCompute() {
         return;
     }
     scheduler.RequestOutsideRenderPassOperationContext();
-    record_read_barrier();
+    scheduler.NoteComputeWrites();
+    if (can_replace) {
+        // DLSS's evaluation may be recorded next, before the dispatch: the barrier goes first.
+        scheduler.Record([](vk::CommandBuffer cmdbuf) { RecordDispatchBarrier(cmdbuf); });
+    }
 #ifdef EGLANTINE_STREAMLINE
     if (marking_effects) {
         const auto written = pipeline->WrittenImages();
@@ -1858,11 +2249,15 @@ void RasterizerVulkan::DispatchCompute() {
 #else
     scheduler.TraceComputePipeline(pipeline->ShaderHash());
 #endif
-    scheduler.Record([this, pipeline, dim, byte_addressed_shadow, bind = std::move(deferred_bind)
+    scheduler.Record([this, pipeline, dim, byte_addressed_shadow, bind = std::move(deferred_bind),
+                      barrier_recorded = can_replace
 #ifdef EGLANTINE_STREAMLINE
                       , replacement
 #endif
                      ](vk::CommandBuffer cmdbuf) {
+        if (!barrier_recorded) {
+            RecordDispatchBarrier(cmdbuf);
+        }
 #ifdef EGLANTINE_STREAMLINE
         if (replacement && !replacement->EvaluationFailed()) {
             return;
@@ -1943,8 +2338,17 @@ void RasterizerVulkan::FlushAll() {}
 void RasterizerVulkan::SubmitNx2ListCopies(u64 writer) {
     // Submitted at once: ReadGpuWrittenCommands waits on these copies, so they can't sit out
     // the longer DeferFlush interval (#161).
-    if (buffer_cache.Nx2CopyListPages(scheduler.CurrentTick(), writer) &&
-        (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::FenceFlush) || !scheduler.DeferFlush())) {
+    if (!buffer_cache.Nx2CopyListPages(scheduler.CurrentTick(), writer)) {
+        return;
+    }
+    // EDEN_NX2_EXP27 & 8 (zortos293/Lichii#717 DISPATCH_BATCH): the front reads few of the lists
+    // (Ocarina: ~150 dispatches a frame, a submission each), so the copies go when it waits for
+    // one (BufferCacheRuntime::WaitSubmittedTick asks the back), when the back goes idle, or
+    // with the next submission.
+    if ((VideoCore::Nx2Debug::Experiment(27) & 8) != 0 && scheduler.DeferFlushUntilWanted()) {
+        return;
+    }
+    if (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::FenceFlush) || !scheduler.DeferFlush()) {
         scheduler.Flush();
     }
 }
@@ -2044,7 +2448,109 @@ bool RasterizerVulkan::HasCachedReports(DAddr addr, u64 size) {
     return query_cache.HasCachedReports(addr, size);
 }
 
+namespace {
+/// Guest reads and writes of cached memory (GetFlushArea, OnCPUWrite), logged every 5 s: the
+/// lock-free answers, the locked ones, and the locked reads that must flush.
+struct GuestAccessCounters {
+    std::atomic<u64> read_fast{};
+    std::atomic<u64> read_locked{};
+    std::atomic<u64> read_flush{};
+    std::atomic<u64> write_locked{};
+    std::atomic<s64> last_log{};
+};
+GuestAccessCounters g_guest_access;
+
+void CountGuestAccess(std::atomic<u64>& counter) {
+    counter.fetch_add(1, std::memory_order_relaxed);
+    auto& c = g_guest_access;
+    const u64 total = c.read_fast.load(std::memory_order_relaxed) +
+                      c.read_locked.load(std::memory_order_relaxed);
+    if ((total & 4095) != 0) {
+        return;
+    }
+    const s64 now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    s64 last = c.last_log.load(std::memory_order_relaxed);
+    if (now - last < 5000 || !c.last_log.compare_exchange_strong(last, now)) {
+        return;
+    }
+    LOG_INFO(Render_Vulkan,
+             "Guest access of cached memory (5 s): reads {} lock-free, {} locked ({} must "
+             "flush, {} handed to the back); writes {} locked, {} collected",
+             c.read_fast.exchange(0), c.read_locked.exchange(0), c.read_flush.exchange(0),
+             Tegra::g_nx2_guest_reads_handed.exchange(0, std::memory_order_relaxed),
+             c.write_locked.exchange(0),
+             Tegra::g_nx2_guest_writes_collected.exchange(0, std::memory_order_relaxed));
+}
+} // Anonymous namespace
+
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
+    // A guest read of cached memory asked under both caches' mutexes, which the split's back holds
+    // through each draw: 12% of the guest cores' busy time at Castle Town went to waiting for
+    // them. Pages no image was ever registered on (page_filter) and that no GPU write ever marked
+    // (MayBeGpuModified, bits that never clear) need no look: neither cache finds anything there,
+    // and the locked path would answer this same preemptive page-aligned area.
+    const DAddr page_begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
+    const DAddr page_end = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE);
+    // EDEN_NX2_EXP36=1 turns this off (live), for the washed-out scene hunt.
+    if (VideoCore::Nx2Debug::Experiment(36) == 0 && !texture_cache.page_filter.Any(addr, size) &&
+        !MayBeGpuModified(page_begin, page_end - page_begin)) {
+        CountGuestAccess(g_guest_access.read_fast);
+        return VideoCore::RasterizerDownloadArea{
+            .start_address = page_begin,
+            .end_address = page_end,
+            .preemtive = true,
+        };
+    }
+    // EDEN_NX2_EXP60=1: the back holds both mutexes through bursts of draws and re-takes them right
+    // after each release, so a guest read waiting for them slept for milliseconds (Fable answer
+    // 11). Spin a little; if they stay taken, ask for a flush instead: the back serves sync
+    // requests before every draw (TickWork), and FlushRegion of a clean page does nothing.
+    if (VideoCore::Nx2Debug::Experiment(60) != 0) {
+        constexpr int Tries = 256;
+        bool texture_locked = false;
+        bool buffer_locked = false;
+        for (int attempt = 0; attempt < Tries && !(texture_locked && buffer_locked); ++attempt) {
+            texture_locked = texture_locked || texture_cache.mutex.try_lock();
+            buffer_locked = buffer_locked || buffer_cache.mutex.try_lock();
+            if (!(texture_locked && buffer_locked)) {
+                std::this_thread::yield();
+            }
+        }
+        if (!(texture_locked && buffer_locked)) {
+            if (texture_locked) {
+                texture_cache.mutex.unlock();
+            }
+            if (buffer_locked) {
+                buffer_cache.mutex.unlock();
+            }
+            Tegra::g_nx2_guest_reads_handed.fetch_add(1, std::memory_order_relaxed);
+            return VideoCore::RasterizerDownloadArea{
+                .start_address = page_begin,
+                .end_address = page_end,
+                .preemtive = false,
+            };
+        }
+        // Both held: the locked path takes them again recursively.
+        const auto area = GetFlushAreaLocked(addr, size);
+        buffer_cache.mutex.unlock();
+        texture_cache.mutex.unlock();
+        CountGuestAccess(g_guest_access.read_locked);
+        if (!area.preemtive) {
+            g_guest_access.read_flush.fetch_add(1, std::memory_order_relaxed);
+        }
+        return area;
+    }
+    const auto area = GetFlushAreaLocked(addr, size);
+    CountGuestAccess(g_guest_access.read_locked);
+    if (!area.preemtive) {
+        g_guest_access.read_flush.fetch_add(1, std::memory_order_relaxed);
+    }
+    return area;
+}
+
+VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushAreaLocked(DAddr addr, u64 size) {
     std::optional<VideoCore::RasterizerDownloadArea> texture_area;
     {
         std::scoped_lock lock{texture_cache.mutex};
@@ -2142,6 +2648,7 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
 
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
     DEBUG_ASSERT(addr != 0 || size != 0);
+    CountGuestAccess(g_guest_access.write_locked);
     {
         std::scoped_lock lock{buffer_cache.mutex};
         if (buffer_cache.OnCPUWrite(addr, size)) {
@@ -2254,6 +2761,24 @@ u64 RasterizerVulkan::FenceWorkEpoch() const {
 
 void RasterizerVulkan::FlushQueryResults(DAddr addr, u64 size) {
     if (addr == 0 || size == 0 || !query_cache.SemiFlushRegion(addr, size)) {
+        return;
+    }
+    // GPU profile zone "query DMA wait": these waits per second and their ms per second, either
+    // way below (the A/B measure for EXP30).
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::QueryDmaWait};
+    if (VideoCore::Nx2Debug::Experiment(30) != 0) {
+        // EXP30 (zortos293/Lichii#559): the fence carries the reports still waiting for one; on
+        // the split's back its submission may be deferred, and the fencing thread would wait
+        // for this thread to submit it. Then wait for the reports themselves, not for an
+        // operation queued behind everything: the work submitted after them (a few ms of GPU
+        // time while walking) cannot write them.
+        fence_manager.SignalFence([] {});
+        scheduler.FlushDeferred();
+        // From 12 bytes before the read: a 16-byte report (value, then timestamp) starting there
+        // still has words in it, and its slot is the one before the read's.
+        const DAddr wait_begin = addr >= 12 ? addr - 12 : DAddr{0};
+        VideoCommon::BackWaitScope wait_scope{"RasterizerVulkan::FlushQueryResults (own reports)"};
+        Tegra::Nx2WaitAsyncReportsSettled(wait_begin, addr + size - wait_begin);
         return;
     }
     // Below High GPU accuracy a fence runs its own callback at once, so wait for an operation
@@ -3249,8 +3774,14 @@ bool AccelerateDMA::BufferToImage(const Tegra::DMA::ImageCopy& copy_info,
 void RasterizerVulkan::UpdateDynamicStates(GraphicsPipeline* draw_pipeline) {
     auto& regs = maxwell3d->regs;
     auto& flags = maxwell3d->dirty.flags;
+    // A mesh emulation pipeline has static input assembly and vertex input. Binding it replaces
+    // that dynamic state, so leave it to the next regular draw to set again.
+    const bool emulated_mesh{draw_pipeline != nullptr && draw_pipeline->IsEmulatedMesh()};
+    if (emulated_mesh) {
+        state_tracker.InvalidateInputState();
+    }
     const auto topology = maxwell3d->draw_manager.draw_state.topology;
-    const bool topology_changed = state_tracker.ChangePrimitiveTopology(topology);
+    const bool topology_changed = !emulated_mesh && state_tracker.ChangePrimitiveTopology(topology);
     if (topology_changed) {
         flags[Dirty::DepthBiasEnable] = true;
         flags[Dirty::PrimitiveRestartEnable] = true;
@@ -3284,7 +3815,9 @@ void RasterizerVulkan::UpdateDynamicStates(GraphicsPipeline* draw_pipeline) {
     }
 
     if (device.IsExtExtendedDynamicState2Supported()) {
-        UpdatePrimitiveRestartEnable(regs);
+        if (!emulated_mesh) {
+            UpdatePrimitiveRestartEnable(regs);
+        }
         UpdateRasterizerDiscardEnable(regs);
         UpdateDepthBiasEnable(regs);
     }
@@ -3323,7 +3856,7 @@ void RasterizerVulkan::UpdateDynamicStates(GraphicsPipeline* draw_pipeline) {
         UpdateColorWriteEnable(regs);
     }
 
-    if (device.IsExtVertexInputDynamicStateSupported()) {
+    if (device.IsExtVertexInputDynamicStateSupported() && !emulated_mesh) {
         // A draw passes the pipeline it looked up: a second lookup was ~2.5% of the back thread.
         GraphicsPipeline* const gp =
             draw_pipeline != nullptr ? draw_pipeline : pipeline_cache.CurrentGraphicsPipeline();
