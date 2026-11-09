@@ -123,10 +123,10 @@ jobs:
           cp LICENSE.txt artifacts/
           cp -R LICENSES artifacts/
           # Ocarina of Time's shader preparation needs this recipe, which only Fritchii's release zip has.
-          recipe_zip=https://github.com/Frizti/Fritchii/releases/download/fritchii-v5.3/Fritchii-v5.3-Windows-x64.zip
+          recipe_zip=https://github.com/Frizti/Fritchii/releases/download/fritchii-v5.5/Fritchii-v5.5-Windows-x64.zip
           if curl -fsSL --retry 5 --retry-all-errors -o fritchii.zip "$recipe_zip" &&
-             unzip -q fritchii.zip 'Fritchii-v5.3/recipes/*' -d fritchii; then
-            cp -R fritchii/Fritchii-v5.3/recipes artifacts/
+             unzip -q fritchii.zip 'Fritchii-v5.5/recipes/*' -d fritchii; then
+            cp -R fritchii/Fritchii-v5.5/recipes artifacts/
           else
             echo "::warning::Fritchii shader recipe not downloaded; the release ships without it"
           fi

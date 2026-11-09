@@ -19,6 +19,7 @@
 #include <deque>
 #include <fmt/core.h>
 
+#include "common/scm_rev.h"
 #include "common/settings_enums.h"
 #include "common/assert.h"
 #include "common/fs/fs_util.h"
@@ -405,15 +406,20 @@ u32 FrameGenMultiplier() {
                       MAX_FRAME_GEN_MULTIPLIER);
 }
 
+bool FrameGenActive() {
+    // Eggcellent keeps frame generation; Fritchii turns it off in its own builds.
+    return values.frame_gen.GetValue();
+}
+
 size_t FrameGenGenerations() {
-    if (!values.frame_gen.GetValue()) {
+    if (!FrameGenActive()) {
         return 0;
     }
     return FrameGenMultiplier() - 1;
 }
 
 size_t FrameGenMaxGenerations() {
-    if (!values.frame_gen.GetValue()) {
+    if (!FrameGenActive()) {
         return 0;
     }
     if (values.frame_gen_target_rate.GetValue() != 0) {
