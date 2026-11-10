@@ -6,9 +6,11 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 
+#include "audio_core/sink/silent_input_stream.h"
 #include "audio_core/sink/sink.h"
 #include "audio_core/sink/sink_stream.h"
 #include "common/logging.h"
@@ -53,15 +55,31 @@ struct SysmixOutput::Impl {
         open = false;
         engaged = false;
         data_mode = 0;
-        if (host) {
-            sink.CloseStream(host);
-            host = nullptr;
-        }
+        ReleaseHost();
         if (state_event) {
             state_event->Signal(system.Kernel());
         }
     }
 
+    void ReleaseHost() {
+        if (host == silent_input.get()) {
+            silent_input.reset();
+        } else {
+            sink.CloseStream(host);
+        }
+        host = nullptr;
+    }
+
+    /// Replace a host microphone that failed to open or start with silence the guest can capture.
+    void UseSilentInput(u32 guest_channels) {
+        LOG_WARNING(Service_Audio,
+                    "sysmix stream {}: host microphone unavailable, capturing silence", id);
+        ReleaseHost();
+        silent_input = std::make_unique<AudioCore::Sink::SilentInputStream>(system, guest_channels);
+        host = silent_input.get();
+    }
+
+    /// Stop admission and notify the guest after invalid memory or a fatal host-stream failure.
     Result Fault(Result result = ResultInvalidAddressInfo) {
         faulted = true;
         engaged = false;
@@ -76,6 +94,7 @@ struct SysmixOutput::Impl {
         return result;
     }
 
+    /// Read valid ring cursors and verify that the guest has not changed our owned cursor.
     bool ReadOccupancy(u32& read, u32& write, u32& filled) {
         auto& memory = process->GetMemory();
         if (!memory.Read32Acquire(buffer + ReadOffset, read) ||
@@ -87,6 +106,7 @@ struct SysmixOutput::Impl {
         return true;
     }
 
+    /// Signal when captured input or free output space reaches the notification threshold.
     void Notify(u32 filled) {
         const auto available = input_stream ? filled : slots - 1 - filled;
         if (data_mode == 2 && available >= static_cast<u32>(threshold)) {
@@ -101,6 +121,7 @@ struct SysmixOutput::Impl {
     Kernel::KEvent* state_event{};
     Kernel::KEvent* data_event{};
     AudioCore::Sink::SinkStream* host{};
+    std::unique_ptr<AudioCore::Sink::SinkStream> silent_input;
     mutable std::mutex mutex;
     u32 id;
     u64 buffer;
@@ -131,6 +152,7 @@ SysmixOutput::SysmixOutput(Core::System& system, Kernel::KProcess& process,
 
 SysmixOutput::~SysmixOutput() = default;
 
+/// Validate direction-specific creation flags and an aligned, mapped guest ring allocation.
 Result SysmixOutput::ValidateRegion(Kernel::KProcess& process, u64 buffer, u64 size,
                                     u32 creation_flags, bool input) {
     R_UNLESS(creation_flags == (input ? 2U : 0x24U), ResultNotSupported);
@@ -147,6 +169,7 @@ bool SysmixOutput::IsFormatSupported(u32 sample_type, u32 channels, u32 rate) {
            channels == 2 && rate == 48000;
 }
 
+/// Accept 48 kHz S16 or F32 microphone capture with one or two guest channels.
 bool SysmixOutput::IsInputFormatSupported(u32 sample_type, u32 channels, u32 rate) {
     return (channels == 1 || channels == 2) && IsFormatSupported(sample_type, 2, rate);
 }
@@ -155,6 +178,7 @@ bool SysmixOutput::IsInput() const {
     return impl->input_stream;
 }
 
+/// Validate the ring layout and open the host stream, leaving it disengaged until requested.
 Result SysmixOutput::Open(u32 sample_type, u32 channels, u32 rate, u32 frames, u32 prefill,
                           u32 flags) {
     auto& p = *impl;
@@ -187,11 +211,11 @@ Result SysmixOutput::Open(u32 sample_type, u32 channels, u32 rate, u32 frames, u
     p.host = p.sink.AcquireSinkStream(p.system, channels, "sysmix-" + std::to_string(p.id),
                                       p.input_stream ? AudioCore::Sink::StreamType::In
                                                      : AudioCore::Sink::StreamType::Sysmix);
+    if (p.input_stream && (!p.host || !p.host->IsReady())) {
+        p.UseSilentInput(channels);
+    }
     if (!p.host || !p.host->IsReady()) {
-        if (p.host) {
-            p.sink.CloseStream(p.host);
-            p.host = nullptr;
-        }
+        p.ReleaseHost();
         R_RETURN(ResultOperationFailed);
     }
     p.slots = static_cast<u32>(slots);
@@ -226,6 +250,10 @@ Result SysmixOutput::SetEngaged(bool engaged) {
     }
     if (engaged) {
         p.host->Start();
+        if (p.input_stream && (!p.host->IsReady() || p.host->IsPaused())) {
+            p.UseSilentInput(p.channels);
+            p.host->Start();
+        }
         R_UNLESS(p.host->IsReady() && !p.host->IsPaused(), ResultOperationFailed);
     } else {
         p.host->Stop();
@@ -250,21 +278,35 @@ Result SysmixOutput::SetDataNotification(u32 mode, s32 threshold) {
     R_SUCCEED();
 }
 
+/**
+ * Discard up to frames of buffered input; zero also drains pending host capture.
+ * Cursor contention is retried, then returns OperationFailed with purged zero while capture stays
+ * engaged. Invalid memory or cursor ownership still faults the stream.
+ */
 Result SysmixOutput::Purge(u32 frames, u32& purged) {
     auto& p = *impl;
     std::scoped_lock lock{p.mutex};
     purged = 0;
     R_UNLESS(p.input_stream && p.open && !p.faulted, ResultOperationFailed);
-    u32 read{}, write{}, filled{};
-    R_UNLESS(p.ReadOccupancy(read, write, filled), p.Fault());
-    purged = frames == 0 ? filled : std::min(frames, filled);
     auto& memory = p.process->GetMemory();
-    R_UNLESS(memory.WriteExclusive32(p.buffer + ReadOffset, (read + purged) % p.slots, read),
-             p.Fault());
-    if (frames == 0) {
-        p.host->DrainInputSamples(0x10000);
+    u32 read{}, write{}, filled{};
+    // The guest owns the read cursor and may advance it while this call is in flight.
+    for (u32 attempt = 0; attempt < 8; ++attempt) {
+        R_UNLESS(p.ReadOccupancy(read, write, filled), p.Fault());
+        const auto count = frames == 0 ? filled : std::min(frames, filled);
+        if (!memory.WriteExclusive32(p.buffer + ReadOffset, (read + count) % p.slots, read)) {
+            continue;
+        }
+        R_UNLESS(p.ReadOccupancy(read, write, filled), p.Fault());
+        purged = count;
+        if (frames == 0) {
+            p.host->DrainInputSamples(0x10000);
+        }
+        p.Notify(filled);
+        R_SUCCEED();
     }
-    R_SUCCEED();
+    R_UNLESS(p.ReadOccupancy(read, write, filled), p.Fault());
+    R_RETURN(ResultOperationFailed);
 }
 
 Result SysmixOutput::SetGain(f32 gain, s64 ramp_ns) {
@@ -285,6 +327,7 @@ u32 SysmixOutput::GetState() const {
     return impl->open && !impl->faulted ? (impl->engaged ? 2 : 1) : 0;
 }
 
+/// Transfer a bounded PCM block between host audio and the guest ring, preserving cursor ownership.
 void SysmixOutput::Pump() {
     auto& p = *impl;
     std::unique_lock lock{p.mutex, std::try_to_lock};

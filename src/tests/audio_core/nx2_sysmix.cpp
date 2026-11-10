@@ -5,7 +5,10 @@
 #include <array>
 #include <limits>
 #include <span>
+#include <thread>
+#include <vector>
 #include <catch2/catch_test_macros.hpp>
+#include "common/atomic_ops.h"
 #include "common/scope_exit.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_readable_event.h"
@@ -70,6 +73,63 @@ TEST_CASE("sysmix input publishes fresh mono capture across ring wrap", "[sysmix
     REQUIRE(read == write);
 }
 
+TEST_CASE("sysmix input captures silence when the host microphone cannot open", "[sysmix][input]") {
+    Context context;
+    context.sink.ready = false;
+    std::array<s16, 2400> stale{};
+    stale.fill(0x1234);
+    REQUIRE(context.Memory().WriteBlock(Context::Base + 0x1040, stale.data(), sizeof(stale)));
+    SysmixOutput stream{
+        context.system, *context.process, context.sink, 2, Context::Base, Context::Size, 2, true};
+    REQUIRE(stream.Open(2, 1, 48000, 4096, 0, 0).IsSuccess());
+    REQUIRE(context.sink.last == nullptr);
+    REQUIRE(context.sink.closed == 1);
+    REQUIRE(stream.SetEngaged(true).IsSuccess());
+    REQUIRE(stream.GetState() == 2);
+    const auto advance = [&] {
+        context.system.CoreTiming().cpu_ticks += Common::WallClock::CPUTickFreq / 200;
+        context.system.CoreTiming().Advance();
+        stream.Pump();
+    };
+    for (int block = 0; block < 10; ++block) {
+        advance();
+    }
+    u32 write{};
+    REQUIRE(context.Memory().Read32Acquire(Context::Base + 0x1004, write));
+    REQUIRE(write >= 9 * 240);
+    REQUIRE(write <= 10 * 240);
+    std::vector<s16> captured(write);
+    REQUIRE(context.Memory().ReadBlock(Context::Base + 0x1040, captured.data(),
+                                       captured.size() * sizeof(s16)));
+    REQUIRE(std::ranges::all_of(captured, [](s16 sample) { return sample == 0; }));
+    REQUIRE(stream.GetCounters().nonzero_frames == 0);
+    REQUIRE(stream.SetEngaged(false).IsSuccess());
+    const u32 stopped = write;
+    advance();
+    REQUIRE(context.Memory().Read32Acquire(Context::Base + 0x1004, write));
+    REQUIRE(write == stopped);
+}
+
+TEST_CASE("sysmix input captures silence when the host microphone cannot start",
+          "[sysmix][input]") {
+    Context context;
+    context.sink.fail_start = true;
+    SysmixOutput stream{
+        context.system, *context.process, context.sink, 2, Context::Base, Context::Size, 2, true};
+    REQUIRE(stream.Open(2, 1, 48000, 1024, 0, 0).IsSuccess());
+    REQUIRE(context.sink.last != nullptr);
+    REQUIRE(stream.SetEngaged(true).IsSuccess());
+    REQUIRE(context.sink.last == nullptr);
+    for (int block = 0; block < 2; ++block) {
+        context.system.CoreTiming().cpu_ticks += Common::WallClock::CPUTickFreq / 200;
+        context.system.CoreTiming().Advance();
+        stream.Pump();
+    }
+    u32 write{};
+    REQUIRE(context.Memory().Read32Acquire(Context::Base + 0x1004, write));
+    REQUIRE(write >= 240);
+}
+
 TEST_CASE("sysmix input applies gain to float capture and protects producer ownership",
           "[sysmix][input]") {
     Context context;
@@ -94,6 +154,43 @@ TEST_CASE("sysmix input applies gain to float capture and protects producer owne
     stream.Pump();
     REQUIRE(stream.GetState() == 0);
     REQUIRE(stream.GetCounters().faults == 1);
+}
+
+TEST_CASE("sysmix input purge preserves capture during concurrent guest consumption",
+          "[sysmix][input]") {
+    Context context;
+    constexpr u32 frames = 2048;
+    SysmixOutput stream{
+        context.system, *context.process, context.sink, 2, Context::Base, Context::Size, 2, true};
+    REQUIRE(stream.Open(2, 2, 48000, frames, 0, 0).IsSuccess());
+    REQUIRE(stream.SetEngaged(true).IsSuccess());
+    auto* read_cursor = reinterpret_cast<u32_le*>(context.backing + 0x44);
+    auto* write_cursor = reinterpret_cast<u32_le*>(context.backing + 0x1004);
+    std::jthread guest{[&](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            u32_le read{}, write{};
+            static_cast<void>(Common::AtomicCompareAndSwap(read_cursor, u32_le{0}, u32_le{0}, read));
+            static_cast<void>(Common::AtomicCompareAndSwap(write_cursor, u32_le{0}, u32_le{0}, write));
+            if (read != write) {
+                static_cast<void>(Common::AtomicCompareAndSwap(
+                    read_cursor, u32_le{(static_cast<u32>(read) + 1) % (frames + 1)}, read));
+            }
+        }
+    }};
+    const std::array<s16, 480> samples{};
+    for (u32 iteration = 0; iteration < 4096; ++iteration) {
+        context.sink.last->ProcessAudioIn(samples, 240);
+        stream.Pump();
+        u32 purged = 99;
+        const auto result = stream.Purge(iteration % 2 == 0 ? 1 : 0, purged);
+        REQUIRE(stream.GetState() == 2);
+        REQUIRE(stream.GetCounters().faults == 0);
+        if (result.IsFailure()) {
+            REQUIRE(result == Service::Audio::ResultOperationFailed);
+            REQUIRE(purged == 0);
+        }
+    }
+    REQUIRE(stream.GetCounters().accepted_frames > 0);
 }
 
 namespace {

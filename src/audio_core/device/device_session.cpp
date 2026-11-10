@@ -8,7 +8,9 @@
 #include "audio_core/audio_manager.h"
 #include "audio_core/device/audio_buffer.h"
 #include "audio_core/device/device_session.h"
+#include "audio_core/sink/silent_input_stream.h"
 #include "audio_core/sink/sink_stream.h"
+#include "common/logging.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/guest_memory.h"
@@ -30,6 +32,7 @@ DeviceSession::~DeviceSession() {
     Finalize();
 }
 
+/// Acquire the host stream and process reference; capture falls back to silence.
 Result DeviceSession::Initialize(std::string_view name_, SampleFormat sample_format_,
                                  u16 channel_count_, size_t session_id_, Kernel::KProcess* handle_,
                                  u64 applet_resource_user_id_, Sink::StreamType type_) {
@@ -52,21 +55,17 @@ Result DeviceSession::Initialize(std::string_view name_, SampleFormat sample_for
     }
     stream = sink->AcquireSinkStream(system, channel_count, name, type);
     if (type == Sink::StreamType::In && !stream->IsReady()) {
-        sink->CloseStream(stream);
-        stream = nullptr;
-        handle->Close(system.Kernel());
-        handle = nullptr;
-        return Service::Audio::ResultOperationFailed;
+        UseSilentInput();
     }
     initialized = true;
     return ResultSuccess;
 }
 
+/// Release the host stream and process reference, including after a failed initialization.
 void DeviceSession::Finalize() {
     if (initialized) {
         Stop();
-        sink->CloseStream(stream);
-        stream = nullptr;
+        ReleaseStream();
         initialized = false;
     }
 
@@ -76,11 +75,13 @@ void DeviceSession::Finalize() {
     }
 }
 
+/// Start the host stream before scheduling audio ticks; capture falls back to silence.
 Result DeviceSession::Start() {
     if (stream) {
         stream->Start();
-        if (!stream->IsReady()) {
-            return Service::Audio::ResultOperationFailed;
+        if (type == Sink::StreamType::In && (!stream->IsReady() || stream->IsPaused())) {
+            UseSilentInput();
+            stream->Start();
         }
         system.CoreTiming().ScheduleLoopingEvent(std::chrono::nanoseconds::zero(), INCREMENT_TIME,
                                                  thread_event);
@@ -122,6 +123,7 @@ void DeviceSession::AppendBuffers(std::span<const AudioBuffer> buffers) {
     }
 }
 
+/// Copy captured PCM to the guest, padding short or odd-sized buffers with silence.
 void DeviceSession::ReleaseBuffer(const AudioBuffer& buffer) const {
     if (type == Sink::StreamType::In) {
         auto samples{stream->ReleaseBuffer(buffer.size / sizeof(s16))};
@@ -152,6 +154,23 @@ std::optional<std::chrono::nanoseconds> DeviceSession::ThreadFunc() {
         system.AudioCore().GetAudioManager().SetEvent(Event::Type::AudioInManager, true);
     }
     return std::nullopt;
+}
+
+void DeviceSession::ReleaseStream() {
+    if (stream == silent_input.get()) {
+        silent_input.reset();
+    } else {
+        sink->CloseStream(stream);
+    }
+    stream = nullptr;
+}
+
+/// Replace a host microphone that failed to open or start with silence the guest can capture.
+void DeviceSession::UseSilentInput() {
+    LOG_WARNING(Service_Audio, "{}: host microphone unavailable, capturing silence", name);
+    ReleaseStream();
+    silent_input = std::make_unique<Sink::SilentInputStream>(system, channel_count);
+    stream = silent_input.get();
 }
 
 void DeviceSession::SetRingSize(u32 ring_size) {

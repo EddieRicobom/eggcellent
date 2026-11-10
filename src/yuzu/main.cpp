@@ -177,13 +177,28 @@ static std::filesystem::path GetSwitchExeDirectory(const char* argv0) {
 
 // Built into the Frizti builds so players don't have to set anything: the switches tuned for
 // Ocarina of Time. Either nx2_switches.txt overrides any of them (=0 turns one off).
+// Not EDEN_NX2_WRITTEN_SSBO_MARK_KIB=64 (built in from v4 to v5.5): writes past its cap were not
+// tracked, one of the gaps behind the huge glowing triangles (the other: native compute write
+// extents, see BufferCache::ExtentTrust). Castle Town: 43.4/45.0 fps with it, 44.6/43.0 without;
+// the triangles still showed without it alone (2026-11-09).
 constexpr std::pair<const char*, const char*> BuiltinSwitches[] = {
-    {"EDEN_NX2_GRAPHICS_SSBO_BARE", "0"}, {"EDEN_NX2_WRITTEN_SSBO_MARK_KIB", "64"},
+    {"EDEN_NX2_GRAPHICS_SSBO_BARE", "0"},
     {"EDEN_NX2_ACQUIRE_PRECHECK", "2"},   {"EDEN_NX2_MACRO_SINK", "1"},
     {"EDEN_NX2_COMPUTE_SINK", "1"},       {"EDEN_NX2_RING_PAIRS", "1"},
     {"EDEN_NX2_UBO_INPLACE", "1"},        {"EDEN_NX2_PIPELINE_CLEAN", "1"},
     {"EDEN_NX2_LIST_WAIT_SKIP", "1"},     {"EDEN_NX2_PREFLUSH", "1"},
     {"EDEN_NX2_SEM_FAST", "2"},
+    // No 40 MB/s pacing of game file reads (upstream's fix for video freezes in other games):
+    // OoT's videos play fine without it and it slept the game at loads and kills (2026-11-10).
+    {"EDEN_NX2_READ_THROTTLE", "0"},
+    // The texture cache collects from 7.5 GiB at most (a ceiling: smaller cards keep their own
+    // thresholds). Owner's call for v5.7 after the 2026-11-10 playtests (VRAM 10 -> ~6 GB, more
+    // RAM free, no new stutter).
+    {"EDEN_NX2_TC_CEILING_MIB", "7680"},
+    // Idle CPU cores compile ahead the game code another core compiled (each of OoT's 6 cores
+    // has its own recompiler). Owner's call for v5.7 after the 2026-11-10 playtests: Kakariko
+    // felt much better; repeat compiles after reloads 294 -> 8 ms in the night tests.
+    {"EDEN_NX2_JIT_WARM", "1"},
 };
 
 static void LoadNx2Switches(const char* argv0) {

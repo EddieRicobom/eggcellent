@@ -10,6 +10,7 @@
 #include <thread>
 
 #include "core/file_sys/errors.h"
+#include "common/nx2_hitch.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/filesystem/fsp/fs_i_storage.h"
 
@@ -36,26 +37,26 @@ Result IStorage::Read(
     R_UNLESS(length >= 0, FileSys::ResultInvalidSize);
     R_UNLESS(offset >= 0, FileSys::ResultInvalidOffset);
 
-    // Custom (EDEN_NX2_FS_READ_MBPS=<n>): the emulated storage speed in MB/s for this read
-    // throttle (default 40). 0 turns it off. Ocarina of Time streams its opening video with
-    // hundreds of 64 KiB reads a second on the thread that also returns decoder images, so at
-    // 40 MB/s that thread sleeps most of the time and the video falls seconds behind its audio.
-    static const s64 bytes_per_second = [] {
-        const char* value = std::getenv("EDEN_NX2_FS_READ_MBPS");
-        return value != nullptr ? std::strtoll(value, nullptr, 10) * 1'000'000 : ReadBytesPerSecond;
+    // EDEN_NX2_READ_THROTTLE=0 (boot): no 40 MB/s pacing of game file reads. Upstream added it
+    // for video freezes in other games (Eden #4525); in Ocarina of Time it slept 36-151 ms at
+    // boot and area loads and 47 ms when a killed Peahat loaded its effects (2026-11-10).
+    static const bool throttle = [] {
+        const char* const value = std::getenv("EDEN_NX2_READ_THROTTLE");
+        return value == nullptr || value[0] != '0';
     }();
-    if (bytes_per_second > 0) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now < next_read_tick) {
-            std::this_thread::sleep_for(next_read_tick - now);
-        }
-        next_read_tick = std::chrono::steady_clock::now() +
-                         std::chrono::nanoseconds{std::min(length, MaxChargedReadSize) *
-                                                  1'000'000'000 / bytes_per_second};
+    const auto now = std::chrono::steady_clock::now();
+    if (throttle && now < next_read_tick) {
+        // Hitch attribution: sleep_for rounds up to whole ms (1 ms takes ~1.5 ms), on the one FS
+        // thread (fable52_answer_11).
+        const Common::Nx2Hitch::Scope timed{Common::Nx2Hitch::Cause::FileThrottle};
+        std::this_thread::sleep_for(next_read_tick - now);
     }
 
     // Read the data from the Storage backend
-    backend->Read(out_bytes.data(), length, offset);
+    {
+        const Common::Nx2Hitch::Scope timed{Common::Nx2Hitch::Cause::FileRead};
+        backend->Read(out_bytes.data(), length, offset);
+    }
 
     R_SUCCEED();
 }

@@ -74,6 +74,8 @@ add_executable(yuzu
     configuration/configure_general.ui
     configuration/configure_graphics.cpp
     configuration/configure_graphics.h
+    configuration/amd_fsr4_panel.cpp
+    configuration/amd_fsr4_panel.h
     configuration/nvidia_dlss_panel.cpp
     configuration/nvidia_dlss_panel.h
     configuration/configure_graphics.ui
@@ -482,6 +484,8 @@ if (WIN32 AND NOT YUZU_USE_BUNDLED_QT)
         find_program(WINDEPLOYQT_EXECUTABLE NAMES windeployqt6 windeployqt
                      HINTS "${QT_HOST_PATH}/bin" "${QT_TARGET_PATH}/bin")
     endif()
+    file(GENERATE OUTPUT "$<TARGET_FILE_DIR:yuzu>/qt.conf"
+         CONTENT "[Paths]\nPrefix=.\nPlugins=plugins\n")
     if (WINDEPLOYQT_EXECUTABLE)
         set(YUZU_EXE_DIR "$<TARGET_FILE_DIR:yuzu>")
         add_custom_command(TARGET yuzu POST_BUILD COMMAND ${WINDEPLOYQT_EXECUTABLE} "$<TARGET_FILE:yuzu>" --dir "${YUZU_EXE_DIR}" --libdir "${YUZU_EXE_DIR}" --plugindir "${YUZU_EXE_DIR}/plugins" --no-compiler-runtime --no-opengl-sw --no-system-d3d-compiler --no-translations --verbose 0)
@@ -510,6 +514,12 @@ endif()
 # Remember that the linker is incredibly stupid.
 target_link_libraries(yuzu PRIVATE OpenSSL::SSL OpenSSL::Crypto SDL3::SDL3)
 
+# NX archive conversion and editing (nx_tools.cpp) runs nxformat in the process, linked statically.
+if (TARGET nxformat::static_nozstd)
+    target_sources(yuzu PRIVATE nx_tools.h nx_tools.cpp)
+    target_link_libraries(yuzu PRIVATE nxformat::static_nozstd)
+    target_compile_definitions(yuzu PRIVATE LICHII_NX_TOOLS)
+endif()
 create_target_directory_groups(yuzu)
 
 if (ENABLE_RENHDRUM AND RENHDRUM_DOWNLOAD AND WIN32 AND NOT ARCHITECTURE_x86_64)

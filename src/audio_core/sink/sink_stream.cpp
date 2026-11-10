@@ -103,19 +103,19 @@ bool SinkStream::TryAppendOutputBlock(SinkBuffer& buffer, std::span<s16> samples
     return true;
 }
 
+/// Return a guest-sized capture buffer with gain, channel conversion, and underrun padding.
 std::vector<s16> SinkStream::ReleaseBuffer(u64 num_samples) {
     const auto frames = num_samples / system_channels;
     const auto captured = samples_buffer.Pop(frames * device_channels);
-    const auto volume{system_volume * device_volume *
-                      (Settings::values.microphone_volume.GetValue() / 100.0f)};
+    const auto volume{system_volume * device_volume};
     return ConvertInputSamples(captured, num_samples, device_channels, system_channels, volume);
 }
 
+/// Consume fresh input without inventing frames during capture underruns.
 std::vector<s16> SinkStream::DrainInputSamples(u64 max_frames) {
     const auto captured = samples_buffer.Pop(max_frames * device_channels);
     const auto frames = captured.size() / device_channels;
-    const auto volume = system_volume * device_volume *
-                        (Settings::values.microphone_volume.GetValue() / 100.0f);
+    const auto volume = system_volume * device_volume;
     return ConvertInputSamples(captured, frames * system_channels, device_channels, system_channels,
                                volume);
 }
@@ -132,6 +132,7 @@ void SinkStream::ClearQueue() {
     playing_buffer.consumed = true;
 }
 
+/// Update a preview peak or queue guest capture; previews also run while emulation is paused.
 void SinkStream::ProcessAudioIn(std::span<const s16> input_buffer, std::size_t num_frames) {
     if (input_preview) {
         const auto peak = InputPeak(input_buffer, input_preview_gain.load());
@@ -190,6 +191,20 @@ void SinkStream::ProcessAudioIn(std::span<const s16> input_buffer, std::size_t n
         min_played_sample_count = max_played_sample_count;
         max_played_sample_count += frames_written;
     }
+}
+
+RenderOutputClock& GetRenderOutputClock() {
+    static RenderOutputClock clock;
+    return clock;
+}
+
+bool RenderOutputClockEnabled() {
+    static const bool enabled = [] {
+        const char* trace = std::getenv("EDEN_NX2_VIDEO_TRACE");
+        const char* sync = std::getenv("EDEN_NX2_VIDEO_PTS_SYNC");
+        return (trace != nullptr && trace[0] != '0') || sync == nullptr || sync[0] != '0';
+    }();
+    return enabled;
 }
 
 void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::size_t num_frames) {
@@ -276,6 +291,13 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
         last_sample_count_update_time = system.CoreTiming().GetGlobalTimeNs();
         min_played_sample_count = max_played_sample_count;
         max_played_sample_count += actual_frames_written;
+    }
+
+    if (RenderOutputClockEnabled() && type == StreamType::Render &&
+        name == "ADSP_RenderStream-0") {
+        auto& clock = GetRenderOutputClock();
+        clock.played.fetch_add(actual_frames_written, std::memory_order_relaxed);
+        clock.starved.fetch_add(num_frames - actual_frames_written, std::memory_order_relaxed);
     }
 }
 

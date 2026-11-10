@@ -48,6 +48,8 @@ add_executable(tests
     core/nup_validation.cpp
     core/vfs_vector.cpp
     core/file_sys_parsers.cpp
+    core/nx_archive.cpp
+    frontend_common/nx_archive.cpp
     input_common/calibration_lifetime.cpp
     input_common/tas_input.cpp
     video_core/ampere_logged_numeric.cpp
@@ -109,6 +111,7 @@ add_executable(tests
     video_core/ampere_tennis_i2f.cpp
     video_core/ampere_tennis_tessellation.cpp
     video_core/pipeline_cache_files.cpp
+    video_core/evicted_pointer_slots.cpp
     video_core/shader_object_pool.cpp
     video_core/storage_binding_capacity.cpp
     video_core/native_indirect_reset.cpp
@@ -121,6 +124,9 @@ add_executable(tests
     video_core/spirv_builtin_capabilities.cpp
     video_core/spirv_min_max_denorms.cpp
     video_core/spirv_nan_safe_min_max.cpp
+    video_core/virtual_range_cache.cpp
+    video_core/ocarina_upscale.cpp
+    video_core/fsr4_support.cpp
     common/bit_field.cpp
     common/bit_util.cpp
     common/cityhash.cpp
@@ -197,6 +203,9 @@ if (TARGET dynarmic::dynarmic)
     target_sources(tests PRIVATE core/window_trace.cpp)
     target_link_libraries(tests PRIVATE dynarmic::dynarmic)
 endif()
+
+target_compile_definitions(tests PRIVATE
+    LICHII_NX_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/core/nx_fixtures")
 
 add_test(NAME tests COMMAND tests)
 

@@ -18,6 +18,7 @@
 #include "core/core.h"
 #include "yuzu/configuration/configure_microphone.h"
 
+/// Build device, gain, and level controls; keep device selection fixed during emulation.
 ConfigureMicrophone::ConfigureMicrophone(Core::System& system_, QWidget* parent)
     : QWidget{parent}, system{system_} {
     setAccessibleName(tr("Microphone"));
@@ -80,8 +81,9 @@ ConfigureMicrophone::ConfigureMicrophone(Core::System& system_, QWidget* parent)
     // Devices are bound when the audio core is created.
     devices->setEnabled(!system.IsPoweredOn());
     refresh->setEnabled(!system.IsPoweredOn());
+    volume->setEnabled(!system.IsPoweredOn());
     if (system.IsPoweredOn()) {
-        status->setText(tr("Stop emulation to change the microphone input device."));
+        status->setText(tr("Stop emulation to change the microphone input device or volume."));
     }
 }
 
@@ -89,6 +91,7 @@ ConfigureMicrophone::~ConfigureMicrophone() {
     StopTest();
 }
 
+/// Refresh inputs while retaining the selected device, even if temporarily unavailable.
 void ConfigureMicrophone::RefreshDevices() {
     StopTest();
     auto selected = devices->currentData().toString();
@@ -111,6 +114,7 @@ void ConfigureMicrophone::RefreshDevices() {
     devices->setCurrentIndex(index < 0 ? 0 : index);
 }
 
+/// Start independent capture for the level meter, reporting device or permission failures.
 void ConfigureMicrophone::StartTest() {
     using namespace AudioCore::Sink;
     const auto available = GetDeviceListForSink(Settings::values.sink_id.GetValue(), true);
@@ -139,6 +143,7 @@ void ConfigureMicrophone::StartTest() {
     timer->start();
 }
 
+/// Stop metering and release preview capture before its controls or device selection change.
 void ConfigureMicrophone::StopTest() {
     timer->stop();
     preview_sink.reset();
@@ -148,13 +153,14 @@ void ConfigureMicrophone::StopTest() {
     status->clear();
 }
 
+/// Save gain and the input device when emulation is stopped; release any active preview.
 void ConfigureMicrophone::ApplyConfiguration() {
     StopTest();
     if (!system.IsPoweredOn()) {
         Settings::values.audio_input_device_id.SetValue(
             devices->currentData().toString().toStdString());
+        Settings::values.microphone_volume.SetValue(static_cast<u16>(volume->value()));
     }
-    Settings::values.microphone_volume.SetValue(static_cast<u16>(volume->value()));
 }
 
 void ConfigureMicrophone::hideEvent(QHideEvent* event) {
