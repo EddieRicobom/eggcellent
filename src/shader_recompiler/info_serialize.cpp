@@ -16,7 +16,7 @@ namespace {
 // new field here also needs PrecompiledKeptMagic (vk_pipeline_cache.cpp) bumped, so kept files
 // written before are rebuilt.
 #if defined(_MSC_VER) && defined(_WIN64)
-static_assert(sizeof(Info) == 6944,
+static_assert(sizeof(Info) == 6936,
               "Shader::Info changed: list the new fields in VisitInfo, then update this size");
 // The descriptors are held in vectors, so a field they grow does not change sizeof(Info).
 static_assert(sizeof(ConstantBufferDescriptor) == 8 && sizeof(StorageBufferDescriptor) == 80 &&
