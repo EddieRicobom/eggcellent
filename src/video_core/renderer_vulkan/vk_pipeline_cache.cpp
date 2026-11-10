@@ -5205,15 +5205,12 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
             // EDEN_NX2_ASYNC_TRANSLATE=1/2: a draw that may be skipped has its new pipeline
             // translated on a translation thread, and is skipped (as for an unbuilt pipeline)
             // until it is ready. The entry stays empty meanwhile.
-            // An evicted pipeline translated again keeps its storage buffer pointers
-            // (zortos293/Lichii#1143), which only this thread's translation applies.
-            const auto keep = evicted_pointer_slots.Take(graphics_key.Hash());
-            if (!keep && translate_queue && EnqueueTranslation()) {
+            if (translate_queue && EnqueueTranslation()) {
                 NoteSkippedLookup();
                 ++translate_stats.skipped;
                 return nullptr;
             }
-            pipeline = CreateGraphicsPipeline(keep ? &*keep : nullptr);
+            pipeline = CreateGraphicsPipeline();
         }
     } else if (!pipeline && translate_queue) {
         bool pending{};
@@ -5479,7 +5476,6 @@ void PipelineCache::EvictUnusedPipelines() {
         if (used_this_session.erase(it->second.get()) != 0) {
             used_and_evicted.insert(it->first.Hash());
         }
-        evicted_pointer_slots.Remember(it->first.Hash(), pipeline->MappedPointers());
         evicted_pipelines.emplace_back(tick, std::move(it->second));
         graphics_cache.erase(it);
     }
@@ -6190,13 +6186,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             return stage_modules;
         };
     }
-    static_assert(VideoCommon::EvictedPointerSlots::NumPrograms == Maxwell::MaxShaderProgram);
-    VideoCommon::EvictedPointerSlots::Slots mapped_pointers;
-    for (size_t index = 0, env_index = 0; index < Maxwell::MaxShaderProgram; ++index) {
-        if (key.unique_hashes[index] != 0) {
-            mapped_pointers[index] = envs[env_index++]->MappedStoragePointerKeys();
-        }
-    }
     Common::ThreadWorker* const thread_worker{build_in_parallel && !libraries_only ? &workers
                                                                                    : nullptr};
     GraphicsPipeline::LibraryParams library_params{
@@ -6204,15 +6193,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         .spirv_hashes = spirv_hashes,
         .libraries_only = libraries_only,
     };
-    auto pipeline = std::make_unique<GraphicsPipeline>(
+    return std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache,
         libraries_only ? WarmPipelineCache() : vulkan_pipeline_cache,
         libraries_only || t_precompile_build ? nullptr : &shader_notify, device, descriptor_pool,
         guest_descriptor_queue, descriptor_buffer_ring, thread_worker, statistics,
         render_pass_cache, key, std::move(modules), infos, std::move(emit_stages),
         library_params, std::move(mesh_emulation));
-    pipeline->SetMappedPointers(std::move(mapped_pointers));
-    return pipeline;
 
 } catch (const Shader::Exception& exception) {
     auto hash = key.Hash();
@@ -6359,45 +6346,7 @@ void NoteSnapshotCheck(const GraphicsPipelineCacheKey& key, size_t bytes,
 }
 } // Anonymous namespace
 
-void PipelineCache::WarnKeptPointer(size_t program, u64 slot) const {
-    if ((slot >> 63) != 0) {
-        return;
-    }
-    const u32 index = static_cast<u32>(slot >> 32);
-    const u32 offset = static_cast<u32>(slot);
-    const size_t stage = program == 0 ? 0 : program - 1;
-    const auto& cbufs = maxwell3d->state.shader_stages[stage].const_buffers;
-    GPUVAddr value = 0;
-    const char* reason = nullptr;
-    if (index >= cbufs.size() || !cbufs[index].enabled ||
-        offset + sizeof(u64) > cbufs[index].size ||
-        !gpu_memory->IsFullyMappedRange(cbufs[index].address + offset, sizeof(u64))) {
-        reason = "constant buffer not bound";
-    } else {
-        value = gpu_memory->Read<u64>(cbufs[index].address + offset);
-        if (value == 0) {
-            reason = "null";
-        } else if (!gpu_memory->IsWithinGPUAddressRange(value)) {
-            reason = "outside the GPU address range";
-        } else if (!gpu_memory->IsFullyMappedRange(value, 1)) {
-            reason = "unmapped";
-        }
-    }
-    if (!reason) {
-        return;
-    }
-    static std::atomic<u64> kept{};
-    const u64 count = kept.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (count <= 32 || count % 1000 == 0) {
-        LOG_WARNING(Render_Vulkan,
-                    "Graphics pipeline {:016x} translated again after eviction: s{}:c{}[{:#x}] "
-                    "holds {:#x} ({}), kept as the storage buffer pointer it was ({} so far)",
-                    graphics_key.Hash(), program, index, offset, value, reason, count);
-    }
-}
-
-std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
-    const VideoCommon::EvictedPointerSlots::Slots* keep_pointers) {
+std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     const auto begin = std::chrono::steady_clock::now();
     t_runtime_build = true;
     t_build_split = {};
@@ -6417,17 +6366,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             NoteSnapshotCheck(graphics_key, snapshot_bytes, environments.Span());
         }
     };
-    if (keep_pointers) {
-        for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
-            if (graphics_key.unique_hashes[index] == 0) {
-                continue;
-            }
-            environments.envs[index].KeepStoragePointers((*keep_pointers)[index]);
-            for (const u64 slot : (*keep_pointers)[index]) {
-                WarnKeptPointer(index, slot);
-            }
-        }
-    }
 
     std::shared_ptr<ShaderPools> emit_pools;
     auto reservation = emission_budget.TryAcquire(
