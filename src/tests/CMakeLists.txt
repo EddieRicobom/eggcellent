@@ -9,6 +9,7 @@ add_executable(tests
     common/thread_worker.cpp
     video_core/vulkan_overlay_filter.cpp
     video_core/unswizzle_workers.cpp
+    video_core/block_linear_swizzle.cpp
     video_core/aftermath_dump.cpp
     video_core/gpu_timestamp.cpp
     video_core/unbacked_image_policy.cpp
