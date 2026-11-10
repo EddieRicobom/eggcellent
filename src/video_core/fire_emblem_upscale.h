@@ -44,7 +44,7 @@ struct Passes {
 
 constexpr std::optional<Passes> CapturedPasses(u64 program_id) {
     if (program_id == ProgramId) {
-        return Passes{PrepassProgramKey, OutputProgramKey, false, PrepassProgramKeyV111};
+        return Passes{PrepassProgramKey, OutputProgramKey, false, false, PrepassProgramKeyV111};
     }
     if (program_id == StarFoxProgramId) {
         return Passes{StarFoxPrepassProgramKey, StarFoxOutputProgramKey, true};

@@ -1019,7 +1019,6 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             }
         }
     }
-#endif
     static u32 native_capture_count{};
     if (maxwell3d->GetNativeMacroEngine().native_turing &&
         native_capture_count < 16 && [] {
@@ -2176,10 +2175,6 @@ void RasterizerVulkan::DispatchCompute() {
     // marked. The indirect path records its bind at once.
     const bool marking_effects = oot_effects_frame == render_trace_frame && OcarinaTemporalEnabled() &&
                                  !indirect_address && !frame_dump.Capturing();
-#else
-    constexpr bool can_replace = false;
-    constexpr bool marking_effects = false;
-#endif
     ComputePipeline::BindCommand deferred_bind;
     if (!pipeline->Configure(*kepler_compute, *gpu_memory, scheduler, buffer_cache,
                              texture_cache, texture_cache_runtime, byte_addressed_shadow,
@@ -2304,7 +2299,6 @@ void RasterizerVulkan::DispatchCompute() {
     if (barrier_first) {
         scheduler.Record([](vk::CommandBuffer cmdbuf) { RecordDispatchBarrier(cmdbuf); });
     }
-#ifdef EGLANTINE_STREAMLINE
     if (marking_effects) {
         const auto written = pipeline->WrittenImages();
         if (std::ranges::any_of(written, [this](VideoCommon::ImageViewId id) {

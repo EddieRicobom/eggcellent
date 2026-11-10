@@ -164,7 +164,6 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     Common::ScratchBuffer<u8> astc_scan_buffer;
     u64 images_deleted{};
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
-    bool debug_stats{}; ///< Collect what only the debug statistics lines use
     /// EDEN_NX2_RT_EVICT_PRESSURE: fresh render targets to check, with their allocation tick and
     /// how often they were found still in use.
     struct TransientTarget {

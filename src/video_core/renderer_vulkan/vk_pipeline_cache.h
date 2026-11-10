@@ -174,7 +174,12 @@ public:
     };
     [[nodiscard]] MemoryOwnerCounts MemoryOwners();
 
-    [[nodiscard]] ComputePipeline* CurrentComputePipeline();
+    /// native_key: the native compute key of the current program, 0 when it has none
+    [[nodiscard]] ComputePipeline* CurrentComputePipeline(u64& native_key);
+    [[nodiscard]] ComputePipeline* CurrentComputePipeline() {
+        u64 native_key{};
+        return CurrentComputePipeline(native_key);
+    }
 
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback);

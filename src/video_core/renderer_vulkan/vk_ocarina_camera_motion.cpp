@@ -1009,7 +1009,6 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
             .reset = reset,
             .depth_inverted = false,
             .hdr = false,
-            .bias_current_color = bias,
         })) {
         state.scheduler.InvalidateState();
         return false;
