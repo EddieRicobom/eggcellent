@@ -399,6 +399,8 @@ void Config::ReadRendererValues() {
     ReadCategory(Settings::Category::RendererExtensions);
     ReadCategory(Settings::Category::RendererDebug);
 
+    Settings::RefreshNvidiaDlssRuntimeSettings();
+
     EndGroup();
 }
 

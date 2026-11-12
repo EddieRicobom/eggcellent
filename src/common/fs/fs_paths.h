@@ -8,7 +8,10 @@
 
 // yuzu data directories
 
+// Eggcellent retains the existing profile so updates keep the player's saves and settings.
 #define EDEN_DIR "eden"
+#define EDEN_LEGACY_DIR "eden"
+#define LICHII_DIR "lichii"
 #define PORTABLE_DIR "user"
 
 // Sub-directories contained within a yuzu data directory

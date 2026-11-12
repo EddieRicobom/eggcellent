@@ -116,8 +116,8 @@ TEST_CASE("Stores at constant offsets end at the last byte written", "[shader][s
     CHECK(extent.const_end == 0x44);
     CHECK(extent.local_stride == std::array<u32, 3>{});
     CHECK(extent.group_stride == std::array<u32, 3>{});
-    CHECK(At(extent, {64, 1, 1}, std::array<u32, 3>{100, 1, 1}) == 0x44);
-    CHECK(At(extent, {64, 1, 1}, std::nullopt) == 0x44);
+    CHECK(At(extent, {64, 1, 1}, std::array<u32, 3>{100, 1, 1}) == 0x44ULL);
+    CHECK(At(extent, {64, 1, 1}, std::nullopt) == 0x44ULL);
 }
 
 TEST_CASE("Stores indexed by the global invocation id scale with the dispatch",
@@ -137,8 +137,8 @@ TEST_CASE("Stores indexed by the global invocation id scale with the dispatch",
     CHECK(extent.local_stride == std::array<u32, 3>{256, 0, 0});
     CHECK(extent.group_stride == std::array<u32, 3>{16384, 0, 0});
     // 64 invocations: one group
-    CHECK(At(extent, {64, 1, 1}, std::array<u32, 3>{1, 1, 1}) == 244 + 256 * 63);
-    CHECK(At(extent, {64, 1, 1}, std::array<u32, 3>{3, 1, 1}) == 244 + 256 * 63 + 16384 * 2);
+    CHECK(At(extent, {64, 1, 1}, std::array<u32, 3>{1, 1, 1}) == 244ULL + 256 * 63);
+    CHECK(At(extent, {64, 1, 1}, std::array<u32, 3>{3, 1, 1}) == 244ULL + 256 * 63 + 16384 * 2);
     // An indirect dispatch's group count is unknown
     CHECK_FALSE(At(extent, {64, 1, 1}, std::nullopt).has_value());
 }
@@ -176,7 +176,7 @@ TEST_CASE("A multiplication split in 16-bit halves is bounded while its operand 
     CHECK(extent.local_stride == std::array<u32, 3>{48, 0, 0});
     CHECK(extent.group_stride == std::array<u32, 3>{48 * 64, 0, 0});
     // 1024 groups of 64: the largest id is 0xffff, its high half still zero
-    CHECK(At(extent, {64, 1, 1}, std::array<u32, 3>{1024, 1, 1}) == 4 + 48 * (1024 * 64 - 1));
+    CHECK(At(extent, {64, 1, 1}, std::array<u32, 3>{1024, 1, 1}) == 4ULL + 48 * (1024 * 64 - 1));
     // 1025 groups: the id reaches 2^16 and its high half is no longer zero
     CHECK_FALSE(At(extent, {64, 1, 1}, std::array<u32, 3>{1025, 1, 1}).has_value());
 }
@@ -233,7 +233,7 @@ TEST_CASE("Selected offsets take the larger alternative", "[shader][storage_exte
     ir.WriteGlobal32(Address(ir, 0x170, offset), ir.Imm32(0));
     const StorageWriteExtent& extent{fixture.Run(0x170).write_extent};
     REQUIRE(extent.bounded);
-    CHECK(At(extent, {64, 1, 1}, std::array<u32, 3>{1, 1, 1}) == 0x24 + 16 * 63);
+    CHECK(At(extent, {64, 1, 1}, std::array<u32, 3>{1, 1, 1}) == 0x24ULL + 16 * 63);
 }
 
 TEST_CASE("A global store left untracked makes every written buffer unbounded",
@@ -264,7 +264,7 @@ TEST_CASE("Loads and atomics have read extents, buffers only stored to read noth
     REQUIRE(loaded.bounded);
     CHECK(loaded.const_end == 4);
     CHECK(loaded.local_stride == std::array<u32, 3>{4, 0, 0});
-    CHECK(At(loaded, {64, 1, 1}, std::array<u32, 3>{1, 1, 1}) == 4 + 4 * 63);
+    CHECK(At(loaded, {64, 1, 1}, std::array<u32, 3>{1, 1, 1}) == 4ULL + 4 * 63);
     const StorageWriteExtent& wide{fixture.Read(0x190)};
     REQUIRE(wide.bounded);
     CHECK(wide.const_end == 0x20);
@@ -276,7 +276,7 @@ TEST_CASE("Loads and atomics have read extents, buffers only stored to read noth
     // Only stored to: empty and proven
     const StorageWriteExtent& stored{fixture.Read(0x170)};
     CHECK(stored.bounded);
-    CHECK(At(stored, {64, 1, 1}, std::array<u32, 3>{1, 1, 1}) == 0);
+    CHECK(At(stored, {64, 1, 1}, std::array<u32, 3>{1, 1, 1}) == 0ULL);
 }
 
 TEST_CASE("A load indexed by a loaded value has no read extent", "[shader][storage_extent]") {

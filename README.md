@@ -26,7 +26,9 @@ On Windows, extract the entire build archive and run **lichii.exe**. Only use ga
 
 ### Existing saves and settings
 
-The rebrand intentionally retains the existing Eden/Eglantine data directories and configuration keys. It does not move or delete saves, settings or shader caches. Back up your saves before testing experimental builds.
+This build keeps the existing profile: `%APPDATA%\eden` on Windows, and the `eden` directories under `$XDG_DATA_HOME`, `$XDG_CONFIG_HOME` and `$XDG_CACHE_HOME` on Linux and macOS. An existing portable `user/` directory still takes priority.
+
+Existing saves and settings stay in place after this update. Automatic profile import and the new save-copy tools are disabled pending further validation.
 
 ## Compatibility and issue reports
 

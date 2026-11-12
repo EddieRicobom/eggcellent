@@ -8,6 +8,9 @@
 #include <string>
 
 #include <QApplication>
+#include <QMessageBox>
+#include <cstdlib>
+#include <exception>
 
 #include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
@@ -211,11 +214,11 @@ static void LoadNx2Switches(const char* argv0) {
         ParseSwitchFile(exe_dir / "nx2_switches.txt", entries);
     }
 #ifdef _WIN32
-    const auto config_dir = Common::FS::GetAppDataRoamingDirectory() / EDEN_DIR;
+    const auto app_data = Common::FS::GetAppDataRoamingDirectory();
 #else
-    const auto config_dir = Common::FS::GetDataDirectory("XDG_CONFIG_HOME") / EDEN_DIR;
+    const auto app_data = Common::FS::GetDataDirectory("XDG_CONFIG_HOME");
 #endif
-    ParseSwitchFile(config_dir / "nx2_switches.txt", entries);
+    ParseSwitchFile(app_data / EDEN_DIR / "nx2_switches.txt", entries);
     for (const auto& [name, value] : entries) {
         if (std::getenv(name.c_str()) != nullptr) {
             continue;
@@ -376,10 +379,15 @@ int main(int argc, char* argv[]) {
     // generating shaders
     setlocale(LC_ALL, "C");
 
-    MainWindow main_window{has_broken_vulkan};
-    // After settings have been loaded by GMainWindow, apply the filter
-    main_window.show();
-
-    app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window, &MainWindow::OnAppFocusStateChanged);
-    return app.exec();
+    try {
+        MainWindow main_window{has_broken_vulkan};
+        main_window.show();
+        app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window,
+                    &MainWindow::OnAppFocusStateChanged);
+        return app.exec();
+    } catch (const std::exception& exception) {
+        QMessageBox::critical(nullptr, QObject::tr("Fritchii startup stopped"),
+                              QString::fromUtf8(exception.what()));
+        return EXIT_FAILURE;
+    }
 }

@@ -52,11 +52,6 @@ std::string Header(u32 version) {
            std::string(reinterpret_cast<const char*>(&version), sizeof(version));
 }
 
-std::string Header(u32 version) {
-    return std::string(Magic.data(), Magic.size()) +
-           std::string(reinterpret_cast<const char*>(&version), sizeof(version));
-}
-
 // Merge tests use records of a key, a size and that many bytes.
 std::string Record(u32 key, std::string_view body) {
     std::string record(reinterpret_cast<const char*>(&key), sizeof(key));
@@ -136,7 +131,7 @@ TEST_CASE("A newer cache's pipelines are appended once, its source untouched",
     CHECK(result.added_pipelines == 2);
     CHECK(result.added_records == 3);
     CHECK(result.known_pipelines == 1);
-    CHECK(ReadAll(own) == Header(52) + own_body + new_records);
+    CHECK(ReadAll(own) == (Header(52) + own_body + new_records));
     CHECK(ReadAll(zortos) == source_before);
     CHECK_FALSE(std::filesystem::exists(temp.path / "vulkan-frizti.fork-v52.bin.merging"));
 
@@ -157,7 +152,7 @@ TEST_CASE("A cache is created from a newer one when there is none", "[pipeline_c
     const auto result = Merge(zortos, own, keys);
     REQUIRE(result.status == VideoCommon::PipelineCacheMergeResult::Status::Merged);
     CHECK(result.added_pipelines == 2);
-    CHECK(ReadAll(own) == Header(52) + Record(7, "x") + Record(8, "y"));
+    CHECK(ReadAll(own) == (Header(52) + Record(7, "x") + Record(8, "y")));
 }
 
 TEST_CASE("A broken or foreign cache is never merged", "[pipeline_cache_files]") {
@@ -197,7 +192,7 @@ TEST_CASE("Used pipeline lists are merged with the lowest age", "[pipeline_cache
     const auto zortos = temp.path / "zortos_used.bin";
     WriteUsed(own, UsedMagic, {{1, 0}, {2, 3}}, 2);
     WriteUsed(zortos, UsedMagic, {{2, 1}, {3, 0}, {4, 5}}, 3);
-    REQUIRE(VideoCommon::MergeUsedPipelineLists(zortos, own, UsedMagic) == 2);
+    REQUIRE(VideoCommon::MergeUsedPipelineLists(zortos, own, UsedMagic) == size_t{2});
     const auto used = ReadUsed(own);
     CHECK(used == std::unordered_map<u64, u8>{{1, 0}, {2, 1}, {3, 0}, {4, 5}});
 
@@ -212,7 +207,7 @@ TEST_CASE("Used pipeline lists are merged with the lowest age", "[pipeline_cache
     // With no list of our own, the other one is taken whole.
     const auto missing = temp.path / "missing_used.bin";
     WriteUsed(zortos, UsedMagic, {{9, 0}}, 1);
-    CHECK(VideoCommon::MergeUsedPipelineLists(zortos, missing, UsedMagic) == 1);
+    CHECK(VideoCommon::MergeUsedPipelineLists(zortos, missing, UsedMagic) == size_t{1});
     CHECK(ReadUsed(missing) == std::unordered_map<u64, u8>{{9, 0}});
 }
 

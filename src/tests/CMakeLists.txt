@@ -5,7 +5,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_executable(tests
-    common/addon_config.cpp
     common/thread_worker.cpp
     video_core/vulkan_overlay_filter.cpp
     video_core/unswizzle_workers.cpp
@@ -70,6 +69,7 @@ add_executable(tests
     video_core/fire_emblem_upscale.cpp
     video_core/query_copy.cpp
     video_core/dlss_contract.cpp
+    video_core/dlss_mode.cpp
     video_core/ampere_fast_fusion.cpp
     video_core/ampere_async_copy.cpp
     video_core/ampere_trap_guards.cpp
@@ -87,8 +87,6 @@ add_executable(tests
     video_core/multi_range_refresh.cpp
     video_core/command_fetch_order.cpp
     video_core/gpu_written_pages.cpp
-    video_core/command_writer.cpp
-    video_core/split_fence_wait.cpp
     video_core/async_report_wait.cpp
     video_core/command_snapshot_suspensions.cpp
     video_core/pending_maps.cpp
@@ -132,6 +130,7 @@ add_executable(tests
     common/bit_util.cpp
     common/cityhash.cpp
     common/container_hash.cpp
+    common/data_directories.cpp
     common/event.cpp
     common/fibers.cpp
     common/frizti_settings.cpp
@@ -197,7 +196,7 @@ add_executable(tests
 
 create_target_directory_groups(tests)
 
-target_link_libraries(tests PRIVATE common core audio_core input_common video_core)
+target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 if (TARGET dynarmic::dynarmic)
@@ -215,6 +214,10 @@ if (TARGET SDL3::SDL3)
     target_link_libraries(sdl_window_state_tests PRIVATE SDL3::SDL3 Catch2::Catch2WithMain)
     add_test(NAME sdl_window_state_tests COMMAND sdl_window_state_tests)
 endif()
+add_executable(profile_migration_tests
+    common/profile_migration.cpp)
+target_link_libraries(profile_migration_tests PRIVATE common Catch2::Catch2WithMain)
+add_test(NAME profile_migration_tests COMMAND profile_migration_tests)
 
 if (WIN32 AND ARCHITECTURE_x86_64)
     add_executable(event_wait_probe ../../tools/nx2/event_wait_probe.cpp)
@@ -239,6 +242,12 @@ if (NOT ANDROID)
     target_link_libraries(config_tests PRIVATE common SimpleIni::SimpleIni Catch2::Catch2WithMain
         ${PLATFORM_LIBRARIES})
     add_test(NAME config_tests COMMAND config_tests)
+    add_executable(profile_import_tests
+        frontend_common/profile_import.cpp
+        ../frontend_common/profile_import.cpp)
+    target_link_libraries(profile_import_tests PRIVATE common SimpleIni::SimpleIni
+        Catch2::Catch2WithMain ${PLATFORM_LIBRARIES})
+    add_test(NAME profile_import_tests COMMAND profile_import_tests)
 endif()
 
 # needed for vma

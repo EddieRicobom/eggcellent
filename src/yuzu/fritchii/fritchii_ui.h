@@ -67,7 +67,6 @@ inline constexpr const char* DiscordInvite = "https://discord.gg/fritchii";
 inline constexpr const char* DonateLink = "https://paypal.me/frizti";
 void OpenDiscord();
 void OpenDonate();
-
 /// Settings backups in config/backups/<yyyy-MM-dd HHmmss>: qt-config.ini, frizti.ini and the
 /// per-game configs (custom/). Copies the current ones and keeps the newest 10; returns the
 /// folder, empty when nothing could be saved.
