@@ -4,7 +4,7 @@ O Eggcellent junta vários forks do Eglantine/Eden num só emulador de Switch 2.
 onde vem o código, como trazer novidades para a `main` e o que não pode se perder no caminho. Está
 escrito para quem (pessoa ou IA) continuar o trabalho sem o histórico da conversa.
 
-Última revisão: 2026-11-11. `main` em `0b03d47f63` = Fritchii v5.7 + extras do Eggcellent.
+Última revisão: 2026-11-12. `main` = Fritchii v5.8.4 + extras do Eggcellent.
 
 ## Regras do dono do repositório
 
@@ -25,7 +25,7 @@ escrito para quem (pessoa ou IA) continuar o trabalho sem o histórico da conver
 
 | Prioridade | Repositório | Como trazer | Observação |
 |---|---|---|---|
-| Base | [Frizti/Fritchii](https://github.com/Frizti/Fritchii) | Merge da **tag** `fritchii-vX.Y` | A árvore da `main` é o Fritchii. O código novo só existe nas tags; a branch `nx2` parou em 2026-11-06. Já mesclado: v4.1, v5.3, v5.5, v5.7. |
+| Base | [Frizti/Fritchii](https://github.com/Frizti/Fritchii) | Merge da **tag** `fritchii-vX.Y` | A árvore da `main` é o Fritchii. O código novo só existe nas tags; a branch `nx2` parou em 2026-11-06. Já mesclado: v4.1, v5.3, v5.5, v5.7, v5.8.4. O repositório saiu do GitHub em 2026-11. |
 | Alta | [zortos293/Lichii](https://github.com/zortos293/Lichii) | Cherry-pick de commits do `nx2` e de PRs (`refs/pull/N/head`) | Upstream do Fritchii. Releases `build-N`. Nunca mescle o `nx2` inteiro: conflita em centenas de trechos. |
 | Média | [Djihads80/Eglantine](https://github.com/Djihads80/Eglantine) | Cherry-pick | Upstream antigo. Pouca novidade desde 2026-11-08. |
 | Baixa | [MythosOfs/Orchid](https://github.com/MythosOfs/Orchid) | Cherry-pick caso a caso | Diverge muito; a maioria dos commits é de Xenoblade, Tennis, Wonder e documentação. |
@@ -54,8 +54,9 @@ Sem token, a API do GitHub aceita 60 requisições por hora.
    fáceis.
 3. Resolva **por trecho**, nunca o arquivo inteiro com `--theirs`. Em geral vale o lado do Fritchii;
    mantenha o nosso só nos itens da seção abaixo.
-4. Atualize a URL da receita de shaders em `.github/workflows/eggcellent-windows.yml` para a tag nova
-   (`fritchii-vX.Y/Fritchii-vX.Y-Windows-x64.zip` e a pasta `Fritchii-vX.Y/recipes`).
+4. Confira `VulkanPipelineCacheVersion` em `src/video_core/pipeline_cache_files.h`. A receita do OOT
+   em `dist/recipes/` só vale para a versão no nome do arquivo (`cache v54`). Se o número mudar, gere
+   ou traga uma receita nova (ferramenta `tools/nx2-precompile` ou builds do Lichii) antes do push.
 5. Compile (seção Compilação), corrija e faça um commit "Fit ..." com os ajustes.
 
 ## O que é só do Eggcellent e precisa sobreviver aos merges
@@ -81,8 +82,8 @@ Sem token, a API do GitHub aceita 60 requisições por hora.
   Ao pegar a lista nova do Fritchii, troque `&values.` por `&settings_values.`.
 - `src/CMakeLists.txt`: avisos de sombreamento (`/wd4456`–`/wd4459`, `/wd5245`) não são erro. O
   Fritchii compila com clang e traz esses avisos aos montes.
-- CI: o passo que baixa a receita do OOT (`recipes/OoT v131072 (cache v54).nx2recipe`) do zip do
-  Fritchii. O zip final precisa ter a pasta `recipes/`.
+- Receita de shaders do OOT guardada no repositório: `dist/recipes/OoT v131072 (cache v54).nx2recipe`
+  (o Fritchii saiu do GitHub). O CI copia `dist/recipes` para o zip e falha se ela faltar.
 
 ## Armadilhas conhecidas
 
