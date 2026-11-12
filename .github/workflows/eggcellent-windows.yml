@@ -122,15 +122,10 @@ jobs:
           rm -f artifacts/*.pdb artifacts/eden-cli.exe
           cp LICENSE.txt artifacts/
           cp -R LICENSES artifacts/
-          # Ocarina of Time's shader preparation needs this recipe, which only Fritchii's release zip has.
-          recipe_zip=https://github.com/Frizti/Fritchii/releases/download/fritchii-v5.8.4/Fritchii-v5.8.4-Windows-x64.zip
-          if curl -fsSL --retry 5 --retry-all-errors -o fritchii.zip "$recipe_zip" &&
-             unzip -q fritchii.zip 'Fritchii-v5.8.4/recipes/*' -d fritchii; then
-            cp -R fritchii/Fritchii-v5.8.4/recipes artifacts/
-          else
-            echo "::warning::Fritchii shader recipe not downloaded; the release ships without it"
-          fi
-          rm -rf fritchii fritchii.zip
+          # Ocarina of Time's shader preparation recipe. Fritchii, where it came from, is no longer
+          # on GitHub, so the repository keeps its own copy.
+          cp -R dist/recipes artifacts/
+          test -f "artifacts/recipes/OoT v131072 (cache v54).nx2recipe"
           printf 'Eggcellent for Windows x64\n\nExtract all files and run eglantine.exe.\nIf Windows reports a missing Visual C++ runtime, run vc_redist.x64.exe.\nUse your own keys, firmware and games; they are not included.\nThis build is experimental.\n' > artifacts/LEIA-ME.txt
           mkdir release-output
           (cd artifacts && zip -qr ../release-output/eggcellent-windows-x86_64.zip .)
