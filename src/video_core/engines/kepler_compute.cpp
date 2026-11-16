@@ -1063,6 +1063,9 @@ void KeplerCompute::CallMultiMethod(Core::System& system, u32 method, const u32*
 }
 
 bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& qmd) {
+    // Native launches consume the pending inline uploads, just as register launches do.
+    // Lichii #1908: otherwise these records can grow throughout a play session.
+    uploads.clear();
     launch_description = {};
     launch_description.grid_dim_x.Assign(qmd[12]);
     launch_description.grid_dim_y.Assign(qmd[13] & 0xffff);
