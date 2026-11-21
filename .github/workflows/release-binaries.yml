@@ -105,7 +105,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install Linux dependencies
         if: startsWith(matrix.platform, 'linux')
@@ -242,7 +242,7 @@ jobs:
 
       - name: Restore CPM downloads
         id: cpm-cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: .cache/cpm
           key: cpm-${{ matrix.platform }}-v2-${{ hashFiles('cpmfile.json', 'CMakeLists.txt', 'CMakeModules/CPM*.cmake', 'externals/**/CMakeLists.txt', 'src/**/CMakeLists.txt') }}
@@ -252,7 +252,7 @@ jobs:
 
       - name: Restore compiler objects
         id: compiler-cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: |
             .ccache
@@ -382,7 +382,7 @@ jobs:
 
       - name: Save CPM downloads
         if: steps.cpm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: .cache/cpm
           key: ${{ steps.cpm-cache.outputs.cache-primary-key }}
@@ -414,7 +414,7 @@ jobs:
 
       - name: Save compiler objects
         if: always() && steps.compiler-cache.outcome == 'success'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: |
             .ccache
@@ -665,7 +665,7 @@ jobs:
       contents: write
     steps:
       - name: Download binaries
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: lichii-*-${{ github.sha }}
           path: artifacts
