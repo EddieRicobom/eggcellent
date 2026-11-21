@@ -16,7 +16,7 @@ jobs:
         shell: msys2 {0}
     steps:
       - name: Check out source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -36,7 +36,7 @@ jobs:
             lerc:p graphite2:p libwebp:p libtiff:p brotli:p ccache:p ffmpeg:p
 
       - name: Restore CPM downloads
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: .cache/cpm
           key: cpm-windows-x86_64-pgo-v2-${{ hashFiles('cpmfile.json', 'CMakeLists.txt', 'CMakeModules/CPM*.cmake', 'externals/**/CMakeLists.txt', 'src/**/CMakeLists.txt') }}
